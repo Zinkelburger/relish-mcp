@@ -1,0 +1,103 @@
+---
+description: How the Relish website works — login flow, page structure, URLs, selectors
+globs: "**/*.py"
+alwaysApply: false
+---
+
+# Relish Website Internals
+
+## Login flow (3 different domains)
+
+1. `GET relish.ezcater.com/schedule` → redirects to `login.ezcater.com/relish/sessions/new`
+2. Email page: input `#identity_email`, submit button `[name=commit]` (it's an `<input type=submit>`, not a `<button>`)
+3. Redirects to `account.ezcater.com/u/login` (Auth0). Password: `#password`, submit: `button[name=action]`
+4. Auth0 password field needs JS value injection — `send_keys()` works but `nativeInputValueSetter` + dispatch is more reliable for special chars.
+5. If MFA required: redirects to `account.ezcater.com/u/mfa-email-challenge`. Code input: `#code`, checkbox: `#rememberBrowser` (use JS click — label overlays it), submit: `button[name=action][value=default]`
+6. After MFA, redirects back to `relish.ezcater.com/schedule`
+
+## MFA gotcha
+
+Each login attempt generates a NEW MFA code. You MUST keep the same browser session alive while waiting for the code. Never kill the browser and re-login with a stale code.
+
+## Cookie persistence
+
+After MFA, save cookies with `driver.get_cookies()`. On next login, load them with `driver.add_cookie()` (navigate to the domain first). The "remember 30 days" checkbox means cookies skip MFA for a month.
+
+## Key URLs
+
+| Page | URL |
+|------|-----|
+| Schedule (today) | `/schedule` |
+| Schedule (date) | `/schedule/YYYY-MM-DD` |
+| Restaurant menu | `/schedule_entries/{entry_id}` |
+| Order item page | `/schedule_entries/{entry_id}/order_items/new?menu_item_id={id}` |
+| Order review | `/orders/{order_id}/review` |
+| Order checkout | `/orders/{order_id}/checkout` (POST via form) |
+| My orders | `/customer_orders` |
+| Order detail | `/customer_orders/{order_id}/order_details` |
+| Cancel order | `/customer_orders/{order_id}/confirm_cancel` (AJAX, data-remote) |
+| Profile | `/user/edit` |
+| Food preferences | `/food_preferences` |
+| Payment methods | `/payment_methods` |
+
+## Ordering flow (5 steps)
+
+1. Navigate to restaurant menu: `/schedule_entries/{entry_id}`
+2. Click item link (`a[href*='menu_item_id={id}']`) → opens Foundation reveal modal
+3. Click `#add-to-cart-button` (value: "Add to cart - $X.XX") → adds to cart sidebar
+4. "Continue to checkout" is in `div.continue-checkout a.button` — inside a hidden cart dropdown, so extract its `href` via JS and navigate directly: `/orders/{order_id}/review`
+5. On review page, click `turbo-frame button[type="submit"]` (class `place-order-*-btn`, text "Place your order for {day}") → places the order
+
+## Cart management
+
+- Cart items show "Remove | Edit" links in `div.cart-action-links`
+- Remove is `a[data-method='delete'][data-remote='true']` — use AJAX DELETE with CSRF token, not direct navigation
+- CSRF token: `document.querySelector('meta[name="csrf-token"]').content`
+- After removing items, `driver.refresh()` to reload the page
+
+## Cancel order flow
+
+- Cancel link is `a[href*='confirm_cancel']` with `data-remote="true"` inside order card
+- Navigate to `/customer_orders`, find the cancel link for the order ID via `#customer_order_{id} a[href*='confirm_cancel']`
+- Click via JS (`data-remote` links use AJAX), then look for confirmation button
+
+## Schedule page selectors
+
+- Subsidy amount: `div.subsidy-widget-right` (may need JS `textContent` — `.text` can be empty in headless)
+- Subsidy label: elements containing text "subsidy"
+- Date tabs: `a[href*='/schedule/']`
+- Restaurant cards: `a[href*='/schedule_entries/']` — each card is a link wrapping the restaurant info
+- Order tracking cards: `[class*='tracking-card']`
+
+## Menu page selectors
+
+Menu items are `<a>` links containing `menu_item_id` in the href. Two rendering styles exist:
+- **Card-style**: `<a href="/schedule_entries/{id}/order_items/new?menu_item_id={id}">Item Name\n$Price</a>` — name/price in link text
+- **List-style**: `<a href="...?category_name=Appetizers&menu_item_id={id}">` — name is in a child `div.item-details`
+
+Use `a[href*='menu_item_id']` to find all items regardless of style.
+
+## Item customization modal
+
+Clicking a menu item link opens a Foundation reveal modal (`#menu-item-modal`). Inside:
+
+- **Sizes**: `input[type="radio"][name="order_item[size_index]"]` with `data-price`. Value is the index (0, 1, ...).
+- **Option groups**: `div.menu-item-section-header` has `<strong>Group Name</strong>` + `<span>(Required/Optional)</span>`.
+- **Choices**: `input[type="checkbox"][name="options[{group_id}]choices[]"]` with `data-price` and `value`. Group ID is the number in the name attribute.
+- **Required vs optional**: `data-required-checkbox-group` on `div.menu_choices_list`, and `(Required)` / `(Optional)` span text.
+- **Add to cart button**: `input#add-to-cart-button` with value like "Add to cart - $11.99".
+- **Notes**: `textarea[name="order_item[notes]"]` or `#order_item_notes`.
+
+### Option types
+
+| Type | HTML | Example |
+|------|------|---------|
+| Size | `input[type=radio]` name=`order_item[size_index]` | Small (0), Regular (1) |
+| Extras | `input[type=checkbox]` name=`options[{id}]choices[]` | Pita +$1.49 |
+| Substitution | `input[type=radio]` name=`options[{id}]choices[]` | Almond Butter instead of PB |
+
+To select an option via Selenium: `driver.execute_script("arguments[0].click()", input_element)`.
+
+## Junk text to filter
+
+Headless Chrome renders font-test strings: `"word word word..."` and `"mmMwWLliI0fiflO&1"`. Always filter these from body text.

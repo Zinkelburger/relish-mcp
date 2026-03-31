@@ -1,0 +1,20 @@
+---
+description: Architecture and conventions for the Relish MCP server
+alwaysApply: true
+---
+
+# Relish MCP Server
+
+Selenium-based MCP server for Relish by ezCater (relish.ezcater.com). Lets AI agents and CLI users view schedules, check subsidies, browse menus, and place/cancel orders.
+
+## Architecture
+
+- `relish_browser.py` — ALL Selenium logic. Nothing else touches the browser.
+- `relish_models.py` — Pure dataclasses, no browser logic.
+- `server.py` — Thin MCP wrapper that calls `RelishBrowser` methods.
+- `.credentials` — JSON `{"email": "...", "password": "..."}`, chmod 600, in `.gitignore`.
+- `.cookies.json` — Saved browser cookies to skip MFA for 30 days, in `.gitignore`.
+
+## Key principle
+
+Keep Selenium contained. If you need new data from the site, add a method to `RelishBrowser`, parse it there, return a model from `relish_models.py`, and expose it via a tool in `server.py`.

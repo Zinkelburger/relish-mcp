@@ -1,0 +1,87 @@
+---
+description: How to use the Relish MCP server to manage corporate lunch orders
+alwaysApply: true
+---
+
+# Relish MCP Server — Agent Guide
+
+You have access to a `relish` MCP server that automates ordering lunch from relish.ezcater.com using a headless browser. The user's company (Red Hat) provides a daily meal subsidy (~$15). Orders within the subsidy cost $0.00.
+
+## Tool workflow
+
+```
+login → get_schedule(date?) → get_menu(schedule_entry_id) → get_item_options(schedule_entry_id, menu_item_id) → place_order(...)
+                                                           → cancel_order(order_id)
+```
+
+### ID chain
+
+Each tool produces IDs the next tool needs:
+
+| Tool | Input | Output IDs |
+|------|-------|-----------|
+| `get_schedule` | date (optional) | `schedule_entry_id` per restaurant, `order_id` per order |
+| `get_menu` | `schedule_entry_id` | `menu_item_id` per item |
+| `get_item_options` | `schedule_entry_id` + `menu_item_id` | `group_id` + `value` per choice, `size_index` |
+| `place_order` | `schedule_entry_id` + `menu_item_id` + options | — |
+| `cancel_order` | `order_id` | — |
+
+### Auth
+
+1. Most tools auto-login using saved cookies (no MFA for 30 days).
+2. If auto-login fails, call `login` explicitly. If it returns "awaiting_mfa", ask the user for the 6-digit code from their email, then call `submit_mfa_code(code)`.
+3. Never retry MFA with the same code — each attempt sends a new one.
+
+## Available tools
+
+| Tool | Purpose | When to use |
+|------|---------|-------------|
+| `login` | Authenticate | First use, or when cookies expire |
+| `submit_mfa_code` | Complete MFA | Only after login returns "awaiting_mfa" |
+| `get_schedule` | See restaurants + orders for a date | Starting point for any date |
+| `get_week_overview` | See the full week at once | "What's for lunch this week?" |
+| `get_subsidy` | Check remaining budget | Before ordering, to verify coverage |
+| `get_menu` | See one restaurant's items | When user picks a restaurant |
+| `get_item_options` | See sizes, sides, toppings for an item | Before placing any order — many items have required choices |
+| `get_all_menus` | See ALL restaurants' items | When comparing options across restaurants |
+| `save_menus_to_file` | Dump all menus to markdown | When user wants a saved reference |
+| `get_orders` | See upcoming/completed orders | Check what's already ordered |
+| `place_order` | Order a specific item | After choosing from a menu |
+| `cancel_order` | Cancel an order | When user wants to change their order |
+| `get_food_preferences` | Get user's food likes/dislikes | Before recommending food |
+| `set_food_preferences` | Update preferences | When user tells you new preferences |
+| `logout` | Close browser session | When completely done |
+
+## Choosing food for the user
+
+1. **Always** call `get_food_preferences` first.
+2. Check `get_subsidy` — recommend items that fit within the remaining budget.
+3. Prefer items from restaurants tagged "Office favorite".
+4. When presenting options, show: item name, price, category, and restaurant.
+5. Let the user confirm before calling `place_order`.
+
+## Common tasks
+
+**"What's for lunch today?"**
+→ `get_schedule()` → summarize restaurants and any existing orders
+
+**"Order me something good"**
+→ `get_food_preferences` → `get_schedule()` → `get_all_menus()` → pick best match → `get_item_options(...)` → confirm with user (show sizes/extras) → `place_order(..., size_index=1, options={...})`
+
+**"Change my Wednesday order"**
+→ `get_orders` → find Wednesday order_id → `cancel_order(order_id)` → `get_schedule("2026-04-01")` → `get_all_menus("2026-04-01")` → pick → `get_item_options(...)` → `place_order`
+
+**"Get me the regular size with extra white sauce"**
+→ `get_item_options(...)` → find size_index for Regular, find group_id for sauces → `place_order(..., size_index=1, options={"options[7632733]choices[]": ["57944363"]})`
+
+**"Show me everything available Thursday"**
+→ `get_all_menus("2026-04-02")` or `save_menus_to_file("2026-04-02")`
+
+## Important notes
+
+- The browser is headless Selenium — each tool call takes 3-10 seconds due to page loads. Batch information gathering when possible.
+- `get_all_menus` loads every restaurant's page sequentially (slow but thorough). Use `get_menu` for a single restaurant.
+- `place_order` clears the cart first, so it's safe to call even if a previous attempt left items in the cart.
+- **Always call `get_item_options` before `place_order`** — many items have required size selections, and some "build your own" items need options to constitute a meal.
+- When passing `options` to `place_order`, the keys are the `group_id` strings and values are lists of `value` strings, both from `get_item_options` output.
+- Dates use `YYYY-MM-DD` format. The schedule only shows dates the company has Relish service.

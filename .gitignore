@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+.credentials
+.cookies.json
+.food_preferences.json
+mfa_code.txt
+probe_status.txt
+html_*.html
+probe*.py
+
+# Ignore throwaway test scripts but keep fixture tests
+test_*.py
+!test_fixtures.py

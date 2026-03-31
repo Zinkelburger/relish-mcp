@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "relish": {
+      "command": "python3",
+      "args": ["server.py"],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "RELISH_HEADLESS": "1"
+      }
+    }
+  }
+}
