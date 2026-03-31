@@ -7,11 +7,21 @@ alwaysApply: true
 
 You have access to a `relish` MCP server that automates ordering lunch from relish.ezcater.com using a headless browser. The user's company (Red Hat) provides a daily meal subsidy (~$15). Orders within the subsidy cost $0.00.
 
+## First-time setup
+
+On first interaction, check if setup is needed. Any tool that requires login will tell you if credentials are missing. The setup flow is:
+
+1. **Credentials**: Call `login` or any tool. If it returns "No credentials configured yet", ask the user for their Relish email and password, then call `set_credentials(email, password)`.
+2. **Login + MFA**: Call `login`. If it returns "awaiting_mfa", ask the user for the 6-digit code from their email, then call `submit_mfa_code(code)`. After success, cookies are saved for 30 days.
+3. **Food preferences**: Call `get_food_preferences`. If it returns "No food preferences configured yet", ask the user what cuisines they like, what to avoid, and any ordering style notes. Then call `set_food_preferences(yes=[...], no=[...], style="...", notes="...")`.
+
+This only needs to happen once — credentials and preferences are saved to disk, and cookies persist for 30 days.
+
 ## Tool workflow
 
 ```
-login → get_schedule(date?) → get_menu(schedule_entry_id) → get_item_options(schedule_entry_id, menu_item_id) → place_order(...)
-                                                           → cancel_order(order_id)
+set_credentials → login → get_schedule(date?) → get_menu(schedule_entry_id) → get_item_options(schedule_entry_id, menu_item_id) → place_order(...)
+                                                                             → cancel_order(order_id)
 ```
 
 ### ID chain
@@ -30,12 +40,14 @@ Each tool produces IDs the next tool needs:
 
 1. Most tools auto-login using saved cookies (no MFA for 30 days).
 2. If auto-login fails, call `login` explicitly. If it returns "awaiting_mfa", ask the user for the 6-digit code from their email, then call `submit_mfa_code(code)`.
-3. Never retry MFA with the same code — each attempt sends a new one.
+3. If credentials are missing, call `set_credentials` first.
+4. Never retry MFA with the same code — each attempt sends a new one.
 
 ## Available tools
 
 | Tool | Purpose | When to use |
 |------|---------|-------------|
+| `set_credentials` | Save email + password | First-time setup, or to change credentials |
 | `login` | Authenticate | First use, or when cookies expire |
 | `submit_mfa_code` | Complete MFA | Only after login returns "awaiting_mfa" |
 | `get_schedule` | See restaurants + orders for a date | Starting point for any date |

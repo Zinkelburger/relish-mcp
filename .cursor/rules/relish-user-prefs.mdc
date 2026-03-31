@@ -1,21 +1,22 @@
 ---
-description: User food preferences and ordering guidelines for Andrew
+description: User food preferences and ordering guidelines
 alwaysApply: true
 ---
 
 # User Preferences
 
-User: (configure your name in .credentials)
-Location: (your office location — visible on the Relish schedule page)
-Subsidy: Your company provides a daily lunch subsidy (varies by day, usually ~$15). Orders within subsidy are $0.00 out-of-pocket.
+Subsidy: The user's company provides a daily lunch subsidy (varies by day, usually ~$15). Orders within subsidy are $0.00 out-of-pocket.
 
 ## Food preferences
 
-When helping pick food or placing orders, follow these guidelines:
-- YES: Mexican bowls, Greek food, Mediterranean, Indian
-- NO: Sushi
-- Prefer bowls and plates over sandwiches when available
-- Pick restaurants tagged "Office favorite" when they match preferences
+Food preferences are stored in `.food_preferences.json` and managed via the `get_food_preferences` / `set_food_preferences` tools.
+
+**If preferences are not configured yet**, ask the user:
+- What cuisines/foods do you like?
+- Anything you want to avoid?
+- Any preferences on ordering style? (e.g. bowls vs sandwiches, big portions vs light)
+
+Then call `set_food_preferences` with their answers.
 
 ## Ordering strategy
 

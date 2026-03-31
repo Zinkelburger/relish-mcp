@@ -22,19 +22,19 @@ _PROJECT_DIR = Path(__file__).parent
 CREDENTIALS_FILE = _PROJECT_DIR / ".credentials"
 PREFS_FILE = _PROJECT_DIR / ".food_preferences.json"
 
-DEFAULT_PREFS = {
-    "yes": ["Mexican bowls", "Greek", "Mediterranean", "Indian"],
-    "no": ["Sushi"],
-    "style": "Prefer bowls and plates over sandwiches",
-    "notes": "Pick restaurants tagged 'Office favorite' when they match preferences",
+DEFAULT_PREFS: dict = {
+    "yes": [],
+    "no": [],
+    "style": "",
+    "notes": "",
 }
 
 
-def _load_credentials() -> tuple[str, str]:
+def _load_credentials() -> tuple[str | None, str | None]:
     """Load credentials from env vars or .credentials file.
 
     Priority: env vars > .credentials file.
-    On first run, creates a template .credentials and raises.
+    Returns (None, None) if no credentials are configured yet.
     """
     email = os.environ.get("RELISH_EMAIL", "")
     password = os.environ.get("RELISH_PASSWORD", "")
@@ -44,17 +44,21 @@ def _load_credentials() -> tuple[str, str]:
     if CREDENTIALS_FILE.exists():
         try:
             data = json.loads(CREDENTIALS_FILE.read_text())
-            return data["email"], data["password"]
-        except (json.JSONDecodeError, KeyError) as e:
-            LOG.warning("Bad .credentials file: %s", e)
+            e, p = data.get("email", ""), data.get("password", "")
+            if e and p:
+                return e, p
+        except (json.JSONDecodeError, KeyError) as exc:
+            LOG.warning("Bad .credentials file: %s", exc)
 
-    template = {"email": "", "password": ""}
-    CREDENTIALS_FILE.write_text(json.dumps(template, indent=2) + "\n")
-    CREDENTIALS_FILE.chmod(0o600)
-    raise RuntimeError(
-        f"No credentials found. Fill in {CREDENTIALS_FILE} with your "
-        "Relish email and password, then restart."
+    return None, None
+
+
+def _save_credentials(email: str, password: str) -> None:
+    CREDENTIALS_FILE.write_text(
+        json.dumps({"email": email, "password": password}, indent=2) + "\n"
     )
+    CREDENTIALS_FILE.chmod(0o600)
+    LOG.info("Credentials saved to %s", CREDENTIALS_FILE)
 
 
 def _load_food_prefs() -> dict:
@@ -63,8 +67,17 @@ def _load_food_prefs() -> dict:
             return json.loads(PREFS_FILE.read_text())
         except (json.JSONDecodeError, OSError):
             pass
-    PREFS_FILE.write_text(json.dumps(DEFAULT_PREFS, indent=2) + "\n")
-    return DEFAULT_PREFS
+    return dict(DEFAULT_PREFS)
+
+
+def _has_food_prefs() -> bool:
+    """True if the user has configured any food preferences."""
+    return bool(
+        FOOD_PREFS.get("yes")
+        or FOOD_PREFS.get("no")
+        or FOOD_PREFS.get("style")
+        or FOOD_PREFS.get("notes")
+    )
 
 
 EMAIL, PASSWORD = _load_credentials()
@@ -75,15 +88,21 @@ mcp = FastMCP(
     instructions=(
         "Relish MCP server for ordering corporate-subsidized lunches via "
         "relish.ezcater.com.\n\n"
-        "## Quick start\n"
-        "1. Call `login`. If it returns 'awaiting_mfa', ask the user for "
-        "the 6-digit email code and call `submit_mfa_code`.\n"
-        "2. Call `get_schedule` to see today's restaurants and existing "
+        "## First-time setup\n"
+        "If credentials aren't configured yet, the agent should:\n"
+        "1. Ask the user for their Relish email and password.\n"
+        "2. Call `set_credentials(email, password)` to save them.\n"
+        "3. Call `login` — if MFA is needed, ask for the 6-digit email "
+        "code and call `submit_mfa_code`.\n"
+        "4. Call `get_food_preferences` — if empty, ask the user what "
+        "cuisines they like/dislike, then call `set_food_preferences`.\n\n"
+        "## Quick start (after setup)\n"
+        "1. Call `get_schedule` to see today's restaurants and existing "
         "orders. Each restaurant has a `schedule_entry_id`.\n"
-        "3. Call `get_menu(schedule_entry_id)` to see a restaurant's "
+        "2. Call `get_menu(schedule_entry_id)` to see a restaurant's "
         "items. Each item has a `menu_item_id`.\n"
-        "4. Call `place_order(schedule_entry_id, menu_item_id)` to order.\n"
-        "5. Call `cancel_order(order_id)` to cancel.\n\n"
+        "3. Call `place_order(schedule_entry_id, menu_item_id)` to order.\n"
+        "4. Call `cancel_order(order_id)` to cancel.\n\n"
         "## Tips\n"
         "- Call `get_food_preferences` before choosing food for the user.\n"
         "- Call `get_week_overview` to see the full week at once.\n"
@@ -105,10 +124,20 @@ def _get_browser() -> RelishBrowser:
     return browser
 
 
+class _MfaRequired(Exception):
+    pass
+
+
+class _NoCredentials(Exception):
+    pass
+
+
 def _ensure_logged_in() -> RelishBrowser:
     """Return a logged-in browser, auto-logging in with saved cookies
-    if possible. Raises if MFA is needed (caller must handle).
+    if possible. Raises _NoCredentials or _MfaRequired.
     """
+    if EMAIL is None or PASSWORD is None:
+        raise _NoCredentials()
     b = _get_browser()
     if b.state == LoginState.LOGGED_IN:
         return b
@@ -118,19 +147,21 @@ def _ensure_logged_in() -> RelishBrowser:
     return b
 
 
-class _MfaRequired(Exception):
-    pass
-
-
 def _auto_login_wrapper(fn):
     """Decorator: auto-login before running a tool, prompting for MFA
-    if needed."""
+    or credentials setup if needed."""
     import functools
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         try:
             _ensure_logged_in()
+        except _NoCredentials:
+            return (
+                "No credentials configured yet. "
+                "Ask the user for their Relish email and password, then "
+                "call `set_credentials(email, password)` to save them."
+            )
         except _MfaRequired:
             return (
                 "Login required but MFA code is needed. "
@@ -148,13 +179,38 @@ def _auto_login_wrapper(fn):
 
 
 @mcp.tool()
+def set_credentials(email: str, password: str) -> str:
+    """Save the user's Relish login credentials.
+
+    Call this during first-time setup. Ask the user for their email and
+    password, then pass them here. Credentials are saved locally in
+    .credentials (chmod 600, never committed to git).
+
+    Args:
+        email: Relish / company email (e.g. 'user@company.com').
+        password: Relish password.
+    """
+    global EMAIL, PASSWORD
+    _save_credentials(email, password)
+    EMAIL, PASSWORD = email, password
+    return "Credentials saved. You can now call `login` to authenticate."
+
+
+@mcp.tool()
 def login() -> str:
-    """Log in to Relish. Call this first.
+    """Log in to Relish.
 
     If saved cookies are valid, logs in instantly (no MFA).
     If cookies expired and MFA is required, returns 'awaiting_mfa' —
     you must then call submit_mfa_code with the 6-digit email code.
+    If no credentials are configured, tells you to call set_credentials first.
     """
+    if EMAIL is None or PASSWORD is None:
+        return (
+            "No credentials configured yet. "
+            "Ask the user for their Relish email and password, then "
+            "call `set_credentials(email, password)` to save them."
+        )
     b = _get_browser()
     if b.state == LoginState.LOGGED_IN:
         return "Already logged in."
@@ -443,7 +499,17 @@ def get_food_preferences() -> str:
     Call this before recommending or choosing food for the user.
     Preferences are stored in .food_preferences.json and can be
     updated with set_food_preferences.
+
+    If no preferences are set, ask the user what they like/dislike
+    and call set_food_preferences to save them.
     """
+    if not _has_food_prefs():
+        return (
+            "No food preferences configured yet. "
+            "Ask the user what cuisines/foods they like, what they want "
+            "to avoid, and any ordering style notes (e.g. 'prefer bowls "
+            "over sandwiches'). Then call `set_food_preferences` to save."
+        )
     lines = ["Food preferences:"]
     yes = FOOD_PREFS.get("yes", [])
     no = FOOD_PREFS.get("no", [])
