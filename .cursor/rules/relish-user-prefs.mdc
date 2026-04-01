@@ -11,16 +11,33 @@ Subsidy: The user's company provides a daily lunch subsidy (varies by day, usual
 
 Food preferences are stored in `.food_preferences.json` and managed via the `get_food_preferences` / `set_food_preferences` tools.
 
-**If preferences are not configured yet**, ask the user:
+**If preferences are not configured yet**, ask the user ALL of the following in one message:
 - What cuisines/foods do you like?
 - Anything you want to avoid?
-- Any preferences on ordering style? (e.g. bowls vs sandwiches, big portions vs light)
+- Ordering style? (bowls vs sandwiches, big portions vs light)
+- Auto-order: should I pick and order automatically, or show picks for approval first?
 
-Then call `set_food_preferences` with their answers.
+Then call `set_food_preferences` with their answers and set `auto_order` in `.food_preferences.json`. Do NOT proceed to ordering until all four questions are answered.
 
 ## Ordering strategy
 
-- **Maximize food**: always prefer more filling, larger portions. Upgrade sizes when the subsidy allows it.
-- **Use the full subsidy**: if there's budget left after the base item, add extras (sides, sauces, etc.) — never leave money on the table.
-- **NEVER exceed the subsidy**: the total (item + extras + tax) must stay at $0.00 out-of-pocket. Estimate ~7% sales tax on additions.
-- Priority: upgrade size first → add filling extras (sides, proteins) → sauces → skip drinks/desserts unless budget is very generous.
+- **Maximize food**: prefer filling, larger portions. Upgrade sizes when subsidy allows.
+- **Use the full subsidy**: add extras (sides, sauces) with leftover budget.
+- **NEVER exceed the subsidy**: total (item + extras + tax) must be $0.00 out-of-pocket.
+- Priority: upgrade size → add filling extras (sides, proteins) → sauces → skip drinks/desserts unless budget is generous.
+
+## Subsidy check — REQUIRED before every order
+
+Before placing any order, call `check_subsidy` with the candidate items and the remaining subsidy amount. This tool applies ~7% tax and tells you if each item is SAFE or OVER.
+
+- If SAFE: proceed with the order.
+- If OVER: pick a cheaper item or drop extras until it fits.
+- Do NOT skip this step. Do NOT rely on mental math.
+
+## Auto-order
+
+The `auto_order` field in `.food_preferences.json` controls confirmation:
+- `false` (default): show picks to the user, wait for approval before ordering.
+- `true`: pick and order immediately, tell the user what was ordered after.
+
+Set directly in the JSON file. On first setup, ask the user which they prefer.

@@ -7,21 +7,37 @@ alwaysApply: true
 
 You have access to a `relish` MCP server that automates ordering lunch from relish.ezcater.com using a headless browser. The user's company (Red Hat) provides a daily meal subsidy (~$15). Orders within the subsidy cost $0.00.
 
-## First-time setup
+## First-run checklist
 
-On first interaction, check if setup is needed. Any tool that requires login will tell you if credentials are missing. The setup flow is:
+On the very first interaction, run through ALL of these steps before doing anything else. Each step detects whether it's needed — skip if already done.
 
-1. **Credentials**: Call `login` or any tool. If it returns "No credentials configured yet", ask the user for their Relish email and password, then call `set_credentials(email, password)`.
-2. **Login + MFA**: Call `login`. If it returns "awaiting_mfa", ask the user for the 6-digit code from their email, then call `submit_mfa_code(code)`. After success, cookies are saved for 30 days.
-3. **Food preferences**: Call `get_food_preferences`. If it returns "No food preferences configured yet", ask the user what cuisines they like, what to avoid, and any ordering style notes. Then call `set_food_preferences(yes=[...], no=[...], style="...", notes="...")`.
+1. **Credentials** — Call `login`. If it returns "No credentials configured yet":
+   - Ask the user for their Relish email and password.
+   - Call `set_credentials(email, password)`.
+   - Call `login` again.
 
-This only needs to happen once — credentials and preferences are saved to disk, and cookies persist for 30 days.
+2. **MFA** — If `login` returns "awaiting_mfa":
+   - Ask the user for the 6-digit code from their email.
+   - Call `submit_mfa_code(code)`.
+   - Cookies are saved for 30 days after success.
+
+3. **Food preferences** — Call `get_food_preferences`. If it returns "No food preferences configured yet", ask the user ALL of the following in one message:
+   - What cuisines/foods do you like?
+   - Anything you want to avoid?
+   - Ordering style? (bowls vs sandwiches, big portions vs light, etc.)
+   - **Auto-order**: Should I pick and order for you automatically, or show you my picks first?
+   - Then call `set_food_preferences(yes=[...], no=[...], style="...", notes="...")` and set `auto_order` in `.food_preferences.json`.
+
+4. **Confirm** — Summarize back to the user: their preferences, auto-order setting, and that they're ready to go.
+
+All of this persists to disk. Subsequent sessions skip straight to ordering.
 
 ## Tool workflow
 
 ```
-set_credentials → login → get_schedule(date?) → get_menu(schedule_entry_id) → get_item_options(schedule_entry_id, menu_item_id) → place_order(...)
+set_credentials → login → get_schedule(date?) → get_menu(schedule_entry_id) → get_item_options(schedule_entry_id, menu_item_id) → check_subsidy(items, subsidy) → place_order(...)
                                                                              → cancel_order(order_id)
+                        → get_unordered_days() → [for each day] get_item_options(...) → check_subsidy(...) → place_order(...)
 ```
 
 ### ID chain
@@ -52,6 +68,7 @@ Each tool produces IDs the next tool needs:
 | `submit_mfa_code` | Complete MFA | Only after login returns "awaiting_mfa" |
 | `get_schedule` | See restaurants + orders for a date | Starting point for any date |
 | `get_week_overview` | See the full week at once | "What's for lunch this week?" |
+| `get_unordered_days` | Scan the week, return full menus for days without orders | Batch ordering — "order for the whole week" |
 | `get_subsidy` | Check remaining budget | Before ordering, to verify coverage |
 | `get_menu` | See one restaurant's items | When user picks a restaurant |
 | `get_item_options` | See sizes, sides, toppings for an item | Before placing any order — many items have required choices |
@@ -60,6 +77,7 @@ Each tool produces IDs the next tool needs:
 | `get_orders` | See upcoming/completed orders | Check what's already ordered |
 | `place_order` | Order a specific item | After choosing from a menu |
 | `cancel_order` | Cancel an order | When user wants to change their order |
+| `check_subsidy` | Verify items fit within subsidy after tax | Before every `place_order` — pass candidate items and subsidy amount |
 | `get_food_preferences` | Get user's food likes/dislikes | Before recommending food |
 | `set_food_preferences` | Update preferences | When user tells you new preferences |
 | `logout` | Close browser session | When completely done |
@@ -67,24 +85,48 @@ Each tool produces IDs the next tool needs:
 ## Choosing food for the user
 
 1. **Always** call `get_food_preferences` first.
-2. Check `get_subsidy` — recommend items that fit within the remaining budget.
-3. Prefer items from restaurants tagged "Office favorite".
-4. When presenting options, show: item name, price, category, and restaurant.
-5. Let the user confirm before calling `place_order`.
+2. Call `get_subsidy` to get the remaining budget.
+3. Pick candidate items, then call `check_subsidy(items, subsidy)` to verify they fit after tax. Only proceed with SAFE items.
+4. Prefer items from restaurants tagged "Office favorite".
+5. When presenting options, show: item name, price, after-tax total, and restaurant.
+6. Check `auto_order` preference — if ON, order immediately; if OFF, show picks and wait for confirmation.
 
-## Common tasks
+## Primary workflow — "order my lunches"
+
+This is the most common request. The user says **"order my lunches"** (or similar: "make my relish orders", "fill in my orders", "order for the week"). The agent should:
+
+1. `get_food_preferences` — know what to pick and check the `auto_order` setting.
+2. `get_unordered_days` — one call returns the full week: days already ordered (skip), days with all restaurants closed (skip), and days needing orders (with full menus).
+3. For each "NEEDS ORDER" day, pick the best item:
+   - Match the user's food preferences (yes list, style, notes).
+   - Prefer restaurants tagged "Office favorite".
+   - Stay within the subsidy — upgrade size first, add extras, but never exceed $0.00 out-of-pocket.
+4. `get_item_options(schedule_entry_id, menu_item_id)` for each pick — check sizes and required options.
+5. `check_subsidy(items, subsidy)` for each pick — verify the item + tax fits. If OVER, pick a cheaper item.
+6. **If `auto_order` is ON**: go ahead and `place_order(...)` for each day immediately. Tell the user what was ordered after the fact.
+7. **If `auto_order` is OFF** (default): present ALL picks to the user in one batch (day, restaurant, item, size, extras, estimated price). Wait for the user to confirm, then `place_order(...)` for each approved day.
+
+This is safe to run daily — it skips days that already have orders.
+
+### Auto-order setting
+
+The `auto_order` flag in food preferences controls whether the agent asks for confirmation:
+
+- **OFF (default)**: agent shows its picks and waits for approval. Good for users who want to see what's coming.
+- **ON**: agent picks and orders in one shot without asking. Good for users who trust the preferences and just want lunch handled.
+
+The user can toggle it anytime: "turn on auto-order" → `set_food_preferences(auto_order=True)`. Or "let me pick from now on" → `set_food_preferences(auto_order=False)`.
+
+## Other common tasks
 
 **"What's for lunch today?"**
 → `get_schedule()` → summarize restaurants and any existing orders
 
-**"Order me something good"**
-→ `get_food_preferences` → `get_schedule()` → `get_all_menus()` → pick best match → `get_item_options(...)` → confirm with user (show sizes/extras) → `place_order(..., size_index=1, options={...})`
+**"Order me something good"** (single day)
+→ `get_food_preferences` → `get_schedule()` → `get_all_menus()` → pick best match → `get_item_options(...)` → confirm with user → `place_order(...)`
 
 **"Change my Wednesday order"**
 → `get_orders` → find Wednesday order_id → `cancel_order(order_id)` → `get_schedule("2026-04-01")` → `get_all_menus("2026-04-01")` → pick → `get_item_options(...)` → `place_order`
-
-**"Get me the regular size with extra white sauce"**
-→ `get_item_options(...)` → find size_index for Regular, find group_id for sauces → `place_order(..., size_index=1, options={"options[7632733]choices[]": ["57944363"]})`
 
 **"Show me everything available Thursday"**
 → `get_all_menus("2026-04-02")` or `save_menus_to_file("2026-04-02")`

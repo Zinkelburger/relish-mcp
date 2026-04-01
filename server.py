@@ -27,6 +27,7 @@ DEFAULT_PREFS: dict = {
     "no": [],
     "style": "",
     "notes": "",
+    "auto_order": False,
 }
 
 
@@ -105,6 +106,8 @@ mcp = FastMCP(
         "4. Call `cancel_order(order_id)` to cancel.\n\n"
         "## Tips\n"
         "- Call `get_food_preferences` before choosing food for the user.\n"
+        "- Call `get_unordered_days` to batch-order: it scans the week and "
+        "returns full menus for every day without an order.\n"
         "- Call `get_week_overview` to see the full week at once.\n"
         "- Most tools auto-login using saved cookies. You only need to "
         "call `login` explicitly on the first use or after cookies expire.\n"
@@ -309,6 +312,86 @@ def get_week_overview() -> str:
 
 @mcp.tool()
 @_auto_login_wrapper
+def get_unordered_days() -> str:
+    """Scan the whole week and return full menus for every day you haven't
+    ordered on yet.
+
+    This is the starting point for batch-ordering: call it once to see
+    every unordered day's restaurants and menu items, then call
+    get_item_options + place_order for each day.
+
+    Returns: for each unordered day — date, subsidy, restaurants with
+    full menu items (name, price, category, item ID). Days that already
+    have orders are listed briefly so you can see the full picture.
+    """
+    b = _get_browser()
+    today_schedule = b.get_schedule()
+    all_dates = today_schedule.available_dates
+
+    schedules = [
+        (today_schedule.date, today_schedule),
+    ]
+    for d in all_dates:
+        if d["date"] == today_schedule.date or d["date"] == "today":
+            continue
+        try:
+            schedules.append((d["date"], b.get_schedule(d["date"])))
+        except Exception as ex:
+            LOG.warning("Skipping %s: %s", d["date"], ex)
+
+    lines: list[str] = []
+    unordered_count = 0
+    ordered_count = 0
+
+    for date_str, sched in schedules:
+        has_order = bool(sched.my_orders)
+        has_open_restaurants = any(not r.closed for r in sched.restaurants)
+
+        if has_order:
+            ordered_count += 1
+            lines.append(f"\n{'='*50}")
+            lines.append(f"{sched.date_label} ({date_str}) — ALREADY ORDERED")
+            lines.append(f"{'='*50}")
+            for o in sched.my_orders:
+                lines.append(f"  • {o}")
+            continue
+
+        if not has_open_restaurants:
+            lines.append(f"\n{'='*50}")
+            lines.append(f"{sched.date_label} ({date_str}) — ALL RESTAURANTS CLOSED")
+            lines.append(f"{'='*50}")
+            continue
+
+        unordered_count += 1
+        lines.append(f"\n{'='*50}")
+        lines.append(f"{sched.date_label} ({date_str}) — NEEDS ORDER")
+        lines.append(f"{'='*50}")
+        if sched.subsidy:
+            lines.append(f"Subsidy: {sched.subsidy}")
+
+        all_menus = b.get_all_menus(date_str)
+        if all_menus:
+            for restaurant, items in all_menus.items():
+                tag_info = ""
+                for r in sched.restaurants:
+                    if r.name == restaurant and r.tags:
+                        tag_info = f" [{', '.join(r.tags)}]"
+                        break
+                lines.append(f"\n  --- {restaurant}{tag_info} ({len(items)} items) ---")
+                for item in items:
+                    lines.append(f"    • {item}")
+        else:
+            for r in sched.restaurants:
+                if not r.closed:
+                    tag = f" [{', '.join(r.tags)}]" if r.tags else ""
+                    lines.append(f"  • {r.name}{tag} (ID: {r.schedule_entry_id})")
+
+    summary = f"Week summary: {unordered_count} day(s) need orders, {ordered_count} already ordered."
+    return summary + "\n" + "\n".join(lines)
+
+
+@mcp.tool()
+@_auto_login_wrapper
 def get_subsidy(date: str | None = None) -> str:
     """Get your remaining company meal subsidy for a date.
 
@@ -488,6 +571,43 @@ def cancel_order(order_id: str) -> str:
 
 
 # ------------------------------------------------------------------
+# Utility tools
+# ------------------------------------------------------------------
+
+
+@mcp.tool()
+def check_subsidy(
+    items: list[dict],
+    subsidy: float,
+    tax_rate: float = 0.07,
+) -> str:
+    """Check whether menu items fit within the subsidy after tax.
+
+    Call this before place_order to make sure the total won't exceed
+    the subsidy. No browser needed — pure math.
+
+    Args:
+        items: List of {"name": "Item Name", "price": 14.50} dicts.
+        subsidy: Remaining subsidy in dollars (from get_subsidy).
+        tax_rate: Estimated tax rate as a decimal. Default 0.07 (7%).
+    """
+    lines: list[str] = []
+    for item in items:
+        name = item.get("name", "Unknown")
+        price = float(item.get("price", 0))
+        total = round(price * (1 + tax_rate), 2)
+        fits = total <= subsidy
+        verdict = "SAFE" if fits else "OVER"
+        remaining = round(subsidy - total, 2)
+        lines.append(
+            f"{name}: ${price:.2f} + {tax_rate:.0%} tax = ${total:.2f} "
+            f"vs ${subsidy:.2f} subsidy — {verdict} "
+            f"({'${:.2f} left'.format(remaining) if fits else '${:.2f} over'.format(-remaining)})"
+        )
+    return "\n".join(lines)
+
+
+# ------------------------------------------------------------------
 # Preferences
 # ------------------------------------------------------------------
 
@@ -510,6 +630,7 @@ def get_food_preferences() -> str:
             "to avoid, and any ordering style notes (e.g. 'prefer bowls "
             "over sandwiches'). Then call `set_food_preferences` to save."
         )
+    auto = FOOD_PREFS.get("auto_order", False)
     lines = ["Food preferences:"]
     yes = FOOD_PREFS.get("yes", [])
     no = FOOD_PREFS.get("no", [])
@@ -523,6 +644,7 @@ def get_food_preferences() -> str:
         lines.append(f"  Style: {style}")
     if notes:
         lines.append(f"  Notes: {notes}")
+    lines.append(f"  Auto-order: {'ON — pick and order without asking' if auto else 'OFF — show picks for confirmation first'}")
     return "\n".join(lines)
 
 
@@ -532,6 +654,7 @@ def set_food_preferences(
     no: list[str] | None = None,
     style: str | None = None,
     notes: str | None = None,
+    auto_order: bool | None = None,
 ) -> str:
     """Update the user's food preferences.
 
@@ -542,6 +665,9 @@ def set_food_preferences(
         no: Cuisines/foods to avoid (e.g. ['Sushi']).
         style: General preference (e.g. 'Prefer bowls over sandwiches').
         notes: Extra notes (e.g. 'Pick Office favorite restaurants').
+        auto_order: If true, the agent picks and orders without asking
+                   for confirmation. If false (default), the agent shows
+                   its picks and waits for the user to confirm.
     """
     global FOOD_PREFS
     if yes is not None:
@@ -552,6 +678,8 @@ def set_food_preferences(
         FOOD_PREFS["style"] = style
     if notes is not None:
         FOOD_PREFS["notes"] = notes
+    if auto_order is not None:
+        FOOD_PREFS["auto_order"] = auto_order
     PREFS_FILE.write_text(json.dumps(FOOD_PREFS, indent=2) + "\n")
     return f"Preferences updated: {json.dumps(FOOD_PREFS)}"
 

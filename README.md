@@ -2,15 +2,36 @@
 
 MCP (Model Context Protocol) server for [Relish by ezCater](https://relish.ezcater.com/) — manage corporate-subsidized lunch orders from your CLI or AI agents.
 
+## Usage
+
+Once set up, just tell the agent:
+
+> **order my lunches**
+
+That's it. The agent will check which days you haven't ordered on yet, pick food based on your saved preferences, and place orders. Run it daily or once a week — it only orders for days that are missing.
+
+By default the agent shows you its picks and waits for a thumbs-up. If you'd rather it just handle everything, say **"turn on auto-order"** and it'll pick and order without asking.
+
+Other things you can say:
+
+| You say | What happens |
+|---------|--------------|
+| **order my lunches** | Fills in all unordered days for the week |
+| **turn on auto-order** | Agent picks and orders without asking from now on |
+| **let me pick** | Back to showing picks for confirmation |
+| **what's for lunch today?** | Shows today's restaurants and your existing order |
+| **order me something good** | Picks and orders one item for today |
+| **change my Wednesday order** | Cancels and re-orders for that day |
+| **show me Thursday's menus** | Lists every menu item available Thursday |
+
 ## Features
 
-- **View schedule** — see available restaurants, delivery times, and meal availability for any date
-- **Browse menus** — get full menus with prices, categories, and dietary tags
-- **Place orders** — complete end-to-end ordering (add to cart → checkout → confirm)
-- **Cancel orders** — cancel existing orders
-- **Check subsidy** — see remaining company meal budget
-- **Week overview** — see all available dates and orders at once
-- **Food preferences** — store and retrieve dietary preferences for AI-assisted ordering
+- **Batch ordering** — one command orders for every unordered day in the week
+- **Food preferences** — remembers what you like and picks accordingly
+- **View schedule** — see available restaurants, delivery times, and meal availability
+- **Browse menus** — full menus with prices, categories, and dietary tags
+- **Place & cancel orders** — end-to-end ordering and cancellation
+- **Subsidy tracking** — stay within your company meal budget automatically
 - **Cookie persistence** — MFA only needed once every 30 days
 
 ## Setup
@@ -42,6 +63,8 @@ chromium --version   # or google-chrome --version
 
 ### 2. Install Python dependencies
 
+Requires **Python 3.11+**.
+
 ```bash
 pip install -r requirements.txt
 ```
@@ -50,26 +73,13 @@ pip install -r requirements.txt
 
 **With Cursor IDE (recommended):**
 
-The `.cursor/mcp.json` is already configured. Open this project in Cursor and the `relish` MCP server will be available to the AI agent.
+The `.cursor/mcp.json` is already configured — just open this project in Cursor and the `relish` MCP server will be available.
 
-If you cloned this repo to a non-default location, update the `cwd` path in `.cursor/mcp.json`:
+> **Note:** The MCP config runs `python3 server.py`. If you installed
+> dependencies in a virtualenv, update `.cursor/mcp.json` to use your
+> venv's Python path (e.g. `".venv/bin/python3"`), or install globally.
 
-```json
-{
-  "mcpServers": {
-    "relish": {
-      "command": "python3",
-      "args": ["server.py"],
-      "cwd": "/path/to/relish-mcp",
-      "env": {
-        "RELISH_HEADLESS": "1"
-      }
-    }
-  }
-}
-```
-
-Set `RELISH_HEADLESS=0` to see the browser window (useful for debugging).
+Set `RELISH_HEADLESS=0` in `.cursor/mcp.json` env to see the browser window (useful for debugging).
 
 **Standalone (stdio transport):**
 
@@ -96,8 +106,10 @@ All of this happens conversationally — just start chatting with the agent and 
 | `submit_mfa_code` | Complete MFA verification |
 | `get_schedule` | Restaurants + orders for a date |
 | `get_week_overview` | Full week summary |
+| `get_unordered_days` | Full menus for every day without an order (batch ordering) |
 | `get_subsidy` | Remaining company meal budget |
 | `get_menu` | One restaurant's menu items |
+| `get_item_options` | Sizes, sides, toppings for an item (call before ordering) |
 | `get_all_menus` | All restaurants' menus for a date |
 | `save_menus_to_file` | Export menus to markdown |
 | `get_orders` | Upcoming or completed orders |
@@ -127,8 +139,11 @@ Stored in `.food_preferences.json` (gitignored). On first use, the agent will as
   "yes": ["Mexican bowls", "Greek", "Mediterranean"],
   "no": ["Sushi"],
   "style": "Prefer bowls and plates over sandwiches",
-  "notes": "Pick restaurants tagged 'Office favorite' when they match preferences"
+  "notes": "Pick restaurants tagged 'Office favorite' when they match preferences",
+  "auto_order": false
 }
 ```
+
+Set `auto_order` to `true` if you want the agent to pick and order without confirmation.
 
 Update anytime via the `set_food_preferences` tool or by editing the file.

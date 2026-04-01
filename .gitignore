@@ -9,6 +9,7 @@ mfa_code.txt
 probe_status.txt
 html_*.html
 probe*.py
+menus_*.md
 
 # Ignore throwaway test scripts but keep fixture tests
 test_*.py
