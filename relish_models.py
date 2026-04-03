@@ -129,7 +129,8 @@ class Order:
 
     def __str__(self) -> str:
         items_str = ", ".join(self.items) if self.items else "No items"
-        return f"{self.restaurant} — {self.status}\n  {self.delivery_time} | {self.price}\n  Items: {items_str}\n  Order ID: {self.order_id}"
+        status_str = f" — {self.status}" if self.status != OrderStatus.UNKNOWN else ""
+        return f"{self.restaurant}{status_str}\n  {self.delivery_time} | {self.price}\n  Items: {items_str}\n  Order ID: {self.order_id}"
 
 
 @dataclass

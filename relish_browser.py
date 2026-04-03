@@ -695,9 +695,7 @@ class RelishBrowser:
                     break
 
         if not add_btn:
-            inner = driver.execute_script("return document.body.innerText")
-            lines = [l.strip() for l in inner.split('\n') if l.strip()][:30]
-            return "Could not find 'Add to cart' button.\n" + "\n".join(lines)
+            return "Could not find 'Add to cart' button. The item modal may not have opened correctly."
 
         driver.execute_script("arguments[0].click()", add_btn)
         sleep(4)
@@ -709,9 +707,7 @@ class RelishBrowser:
             "return el ? el.href : '';"
         )
         if not checkout_url:
-            inner = driver.execute_script("return document.body.innerText")
-            lines = [l.strip() for l in inner.split('\n') if l.strip()][:30]
-            return "Added to cart but no checkout link found.\n" + "\n".join(lines)
+            return "Added to cart but no checkout link found. The cart dropdown may not have appeared."
 
         driver.get(checkout_url)
         sleep(4)
@@ -759,11 +755,12 @@ class RelishBrowser:
                     continue
 
         result_text = driver.execute_script("return document.body.innerText")
-        lines = [l.strip() for l in result_text.split('\n') if l.strip()
-                 and 'word word' not in l and 'mmMwWLli' not in l]
+
         if final_submitted:
-            return "Order placed!\n" + "\n".join(lines[:30])
-        return "On review page but could not place.\n" + "\n".join(lines[:40])
+            summary = self._extract_order_summary(driver, result_text)
+            return f"Order placed successfully. {summary}"
+        lines = self._filter_page_lines(result_text)
+        return "On review page but could not submit order.\n" + "\n".join(lines[:10])
 
     def cancel_order(self, order_id: str) -> str:
         """Cancel an order by its ID. Goes through the orders page
@@ -772,11 +769,29 @@ class RelishBrowser:
         self._require_logged_in()
         driver = self._ensure_driver()
 
-        # Go to orders page and find the cancel link for this order
         driver.get(ORDERS_URL)
         sleep(3)
 
-        # Find the cancel link within this order's card
+        # Extract order info from the card before we cancel it
+        restaurant = ""
+        items = ""
+        try:
+            card = driver.find_element(By.ID, f"customer_order_{order_id}")
+            card_text = card.text.strip()
+            card_lines = [l.strip() for l in card_text.split('\n') if l.strip()]
+            if card_lines:
+                restaurant = card_lines[0]
+            item_els = card.find_elements(By.CSS_SELECTOR, ".card-ordered-item")
+            if not item_els:
+                item_els = card.find_elements(
+                    By.CSS_SELECTOR, ".card-item-description"
+                )
+            item_names = [el.text.strip() for el in item_els if el.text.strip()]
+            items = ", ".join(item_names) if item_names else ""
+        except (NoSuchElementException, StaleElementReferenceException):
+            pass
+
+        # Click the cancel link
         try:
             cancel_link = driver.find_element(
                 By.CSS_SELECTOR,
@@ -787,8 +802,7 @@ class RelishBrowser:
         except NoSuchElementException:
             return f"Could not find cancel button for order {order_id}."
 
-        # A confirmation modal/section should appear — look for confirm button
-        body = driver.find_element(By.TAG_NAME, "body").text
+        # Confirm the cancellation
         try:
             for selector in [
                 "a[data-method='delete']",
@@ -802,12 +816,20 @@ class RelishBrowser:
                     if "cancel" in txt or "yes" in txt or "confirm" in txt:
                         driver.execute_script("arguments[0].click()", btn)
                         sleep(3)
-                        body = driver.find_element(By.TAG_NAME, "body").text
-                        return f"Order {order_id} canceled.\n{body[:300]}"
+                        break
+                else:
+                    continue
+                break
         except Exception:
             pass
 
-        return f"Cancel initiated for order {order_id}. Page state:\n{body[:500]}"
+        body = driver.find_element(By.TAG_NAME, "body").text.lower()
+        success = "canceled" in body or "cancelled" in body
+
+        detail = f" ({restaurant} — {items})" if restaurant and items else ""
+        if success:
+            return f"Order {order_id} canceled successfully.{detail}"
+        return f"Order {order_id} cancel requested (could not confirm success).{detail}"
 
     # ------------------------------------------------------------------
     # Subsidy
@@ -1241,6 +1263,63 @@ class RelishBrowser:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _filter_page_lines(raw_text: str) -> list[str]:
+        """Filter out font-test junk and empty lines from page innerText."""
+        return [
+            l.strip() for l in raw_text.split('\n')
+            if l.strip()
+            and 'word word' not in l
+            and 'mmMwWLli' not in l
+        ]
+
+    def _extract_order_summary(
+        self, driver: webdriver.Chrome, raw_text: str
+    ) -> str:
+        """Pull item name, restaurant, and price from a confirmation page."""
+        parts: list[str] = []
+
+        # Try structured elements first (order detail page)
+        try:
+            item_el = driver.find_element(
+                By.CSS_SELECTOR, ".item-quantity-name, .card-ordered-item"
+            )
+            parts.append(item_el.text.strip())
+        except NoSuchElementException:
+            pass
+
+        try:
+            store_el = driver.find_element(
+                By.CSS_SELECTOR, ".card-store-name, .caterer-logo img"
+            )
+            name = store_el.get_attribute("alt") or store_el.text.strip()
+            name = name.replace("Logo for ", "")
+            if name:
+                parts.append(f"from {name}")
+        except NoSuchElementException:
+            pass
+
+        try:
+            total_el = driver.find_element(
+                By.CSS_SELECTOR, ".last-header .text-right"
+            )
+            total = total_el.text.strip()
+            if total:
+                parts.append(f"total: {total}")
+        except NoSuchElementException:
+            pass
+
+        if parts:
+            return " ".join(parts)
+
+        lines = self._filter_page_lines(raw_text)
+        useful = [l for l in lines[:15] if l.lower() not in (
+            "place an order", "my orders", "sign out", "my account",
+            "account actions", "payment methods", "food preferences",
+            "notifications", "delete account",
+        ) and not l.startswith("Hi, ")]
+        return "\n".join(useful[:5]) if useful else "(no details available)"
 
     def _require_logged_in(self) -> None:
         if self._state != LoginState.LOGGED_IN:

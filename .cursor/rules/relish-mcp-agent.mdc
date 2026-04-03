@@ -95,8 +95,9 @@ Each tool produces IDs the next tool needs:
 2. Call `get_subsidy` to get the remaining budget.
 3. Pick candidate items, then call `check_subsidy(items, subsidy)` to verify they fit after tax. Only proceed with SAFE items.
 4. Prefer items from restaurants tagged "Office favorite".
-5. When presenting options, show: item name, price, after-tax total, and restaurant.
-6. Check `auto_order` preference — if ON, order immediately; if OFF, show picks and wait for confirmation.
+5. **Do NOT prefer items tagged "Previously Ordered"**. That tag only means the user ordered it before — it does NOT mean they liked it. Treat previously ordered items the same as any other item. Always check the `no` list in food preferences, which contains items the user tried and disliked.
+6. When presenting options, show: item name, price, after-tax total, and restaurant.
+7. Check `auto_order` preference — if ON, order immediately; if OFF, show picks and wait for confirmation.
 
 ## Primary workflow — "order my lunches"
 
@@ -150,3 +151,4 @@ The user can toggle it anytime: "turn on auto-order" → `set_food_preferences(a
 - **Always call `get_item_options` before `place_order`** — many items have required size selections, and some "build your own" items need options to constitute a meal.
 - When passing `options` to `place_order`, the keys are the `group_id` strings and values are lists of `value` strings, both from `get_item_options` output.
 - Dates use `YYYY-MM-DD` format. The schedule only shows dates the company has Relish service.
+- **Deduplicate `get_unordered_days` results**: The tool can return a "(today)" entry that is a duplicate of an explicitly-dated entry (e.g., if today is Friday and the next service day is Monday, both "(today)" and "2026-04-06" may appear with **identical `schedule_entry_id`s**). Always deduplicate by `schedule_entry_id` — if two entries share the same restaurant IDs, they are the same day. Use the explicit `YYYY-MM-DD` date and discard the duplicate to avoid ordering for a phantom extra day.
