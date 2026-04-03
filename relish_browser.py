@@ -174,16 +174,28 @@ class RelishBrowser:
         sleep(3)
 
         # Step 1 — email
-        email_field = self._wait_for(By.ID, "identity_email")
-        email_field.send_keys(email)
-        driver.find_element(By.NAME, "commit").click()
+        try:
+            email_field = self._wait_for(By.ID, "identity_email")
+            email_field.send_keys(email)
+            driver.find_element(By.NAME, "commit").click()
+        except (TimeoutException, NoSuchElementException) as exc:
+            raise RuntimeError(
+                "Could not find the email field on the login page. "
+                "The site layout may have changed."
+            ) from exc
         LOG.info("Submitted email")
         sleep(4)
 
         # Step 2 — password (Auth0 page)
-        pw_field = self._wait_for(By.ID, "password")
-        self._js_set_value(pw_field, password)
-        driver.find_element(By.NAME, "action").click()
+        try:
+            pw_field = self._wait_for(By.ID, "password")
+            self._js_set_value(pw_field, password)
+            driver.find_element(By.NAME, "action").click()
+        except (TimeoutException, NoSuchElementException) as exc:
+            raise RuntimeError(
+                "Could not find the password field on the login page. "
+                "The site layout may have changed."
+            ) from exc
         LOG.info("Submitted password")
         sleep(5)
 
@@ -210,7 +222,13 @@ class RelishBrowser:
             )
         driver = self._ensure_driver()
 
-        code_field = driver.find_element(By.ID, "code")
+        try:
+            code_field = driver.find_element(By.ID, "code")
+        except NoSuchElementException as exc:
+            raise RuntimeError(
+                "Could not find the MFA code field on the page. "
+                "The site layout may have changed."
+            ) from exc
         code_field.clear()
         code_field.send_keys(code)
 
@@ -222,9 +240,15 @@ class RelishBrowser:
         except NoSuchElementException:
             pass
 
-        driver.find_element(
-            By.CSS_SELECTOR, "button[name='action'][value='default']"
-        ).click()
+        try:
+            driver.find_element(
+                By.CSS_SELECTOR, "button[name='action'][value='default']"
+            ).click()
+        except NoSuchElementException as exc:
+            raise RuntimeError(
+                "Could not find the MFA submit button on the page. "
+                "The site layout may have changed."
+            ) from exc
         sleep(6)
 
         body = driver.find_element(By.TAG_NAME, "body").text.lower()
@@ -464,11 +488,16 @@ class RelishBrowser:
             input_type = "checkbox" if checkboxes else "radio"
 
             if not inputs:
-                parent_section = header.find_element(By.XPATH, "./following-sibling::*[1]")
-                checkboxes = parent_section.find_elements(
+                try:
+                    sibling_section = header.find_element(
+                        By.XPATH, "./following-sibling::*[1]"
+                    )
+                except NoSuchElementException:
+                    continue
+                checkboxes = sibling_section.find_elements(
                     By.CSS_SELECTOR, "input[type='checkbox']"
                 )
-                radios = parent_section.find_elements(
+                radios = sibling_section.find_elements(
                     By.CSS_SELECTOR,
                     "input[type='radio']:not([name='order_item[size_index]'])"
                 )
@@ -521,8 +550,11 @@ class RelishBrowser:
                         label_text = f"Choice {inp_value}"
 
                 price_str = ""
-                if inp_price and float(inp_price) > 0:
-                    price_str = f"${inp_price}"
+                try:
+                    if inp_price and float(inp_price) > 0:
+                        price_str = f"${inp_price}"
+                except ValueError:
+                    price_str = inp_price
 
                 choices.append(ItemChoice(
                     label=label_text,
@@ -761,7 +793,7 @@ class RelishBrowser:
             for selector in [
                 "a[data-method='delete']",
                 "a.button[href*='cancel']",
-                "button[contains(text(),'Yes')]",
+                "button[type='submit']",
                 "input[type='submit']",
             ]:
                 btns = driver.find_elements(By.CSS_SELECTOR, selector)
@@ -1126,6 +1158,9 @@ class RelishBrowser:
                             "Option %s value %s not found", group_id, val
                         )
 
+        # Auto-select first option for required groups with no selection
+        self._auto_fill_required_groups(driver, options)
+
         # Notes
         if notes:
             try:
@@ -1137,6 +1172,71 @@ class RelishBrowser:
                 notes_field.send_keys(notes)
             except NoSuchElementException:
                 LOG.warning("Notes field not found")
+
+    def _auto_fill_required_groups(
+        self,
+        driver: webdriver.Chrome,
+        explicit_options: dict[str, list[str]] | None,
+    ) -> None:
+        """Auto-select the first choice for any required option group that
+        has no selection yet. Skips groups already handled by explicit_options."""
+        modal = None
+        for sel in ["#menu-item-modal", ".reveal.menu-modal", ".option-form-container"]:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            if els:
+                modal = els[0]
+                break
+        if not modal:
+            return
+
+        headers = modal.find_elements(By.CSS_SELECTOR, ".menu-item-section-header")
+        for header in headers:
+            try:
+                span = header.find_element(By.TAG_NAME, "span")
+                if "required" not in span.text.lower():
+                    continue
+            except NoSuchElementException:
+                continue
+
+            parent = header.find_element(By.XPATH, "./..")
+            radios = parent.find_elements(
+                By.CSS_SELECTOR,
+                "input[type='radio']:not([name='order_item[size_index]'])"
+            )
+            checkboxes = parent.find_elements(
+                By.CSS_SELECTOR, "input[type='checkbox']"
+            )
+            inputs = radios or checkboxes
+            if not inputs:
+                try:
+                    sibling = header.find_element(By.XPATH, "./following-sibling::*[1]")
+                except NoSuchElementException:
+                    continue
+                radios = sibling.find_elements(
+                    By.CSS_SELECTOR,
+                    "input[type='radio']:not([name='order_item[size_index]'])"
+                )
+                checkboxes = sibling.find_elements(
+                    By.CSS_SELECTOR, "input[type='checkbox']"
+                )
+                inputs = radios or checkboxes
+
+            if not inputs:
+                continue
+
+            try:
+                group_id = inputs[0].get_attribute("name") or ""
+                if explicit_options and group_id in explicit_options:
+                    continue
+
+                if any(inp.is_selected() for inp in inputs):
+                    continue
+
+                driver.execute_script("arguments[0].click()", inputs[0])
+                LOG.info("Auto-selected first option for required group: %s", group_id)
+                sleep(0.3)
+            except (StaleElementReferenceException, NoSuchElementException):
+                LOG.warning("Auto-fill: element went stale for a required group, skipping")
 
     # ------------------------------------------------------------------
     # Internal helpers

@@ -1,9 +1,12 @@
 """Relish MCP Server — control Relish by ezCater from your CLI or AI agents."""
 from __future__ import annotations
 
+import datetime
+import functools
 import json
 import logging
 import os
+import threading
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -107,7 +110,7 @@ mcp = FastMCP(
         "## Tips\n"
         "- Call `get_food_preferences` before choosing food for the user.\n"
         "- Call `get_unordered_days` to batch-order: it scans the week and "
-        "returns full menus for every day without an order.\n"
+        "returns which days need orders (then call `get_all_menus` per day).\n"
         "- Call `get_week_overview` to see the full week at once.\n"
         "- Most tools auto-login using saved cookies. You only need to "
         "call `login` explicitly on the first use or after cookies expire.\n"
@@ -150,11 +153,54 @@ def _ensure_logged_in() -> RelishBrowser:
     return b
 
 
+TOOL_TIMEOUT_SECONDS = int(os.environ.get("RELISH_TOOL_TIMEOUT", "50"))
+
+
+def _with_timeout(fn):
+    """Run a tool function in a worker thread with a hard timeout.
+
+    If the function doesn't finish within TOOL_TIMEOUT_SECONDS, returns
+    a graceful error message instead of hanging until the MCP client
+    disconnects.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        result_box: list = []
+        error_box: list = []
+
+        def _target():
+            try:
+                result_box.append(fn(*args, **kwargs))
+            except Exception as exc:
+                error_box.append(exc)
+
+        t = threading.Thread(target=_target, daemon=True)
+        t.start()
+        t.join(timeout=TOOL_TIMEOUT_SECONDS)
+
+        if t.is_alive():
+            # TODO: the abandoned daemon thread still holds the WebDriver.
+            # Consider resetting the browser instance here so the next
+            # call doesn't race with a stale Selenium session.
+            LOG.error(
+                "Tool %s timed out after %ds", fn.__name__, TOOL_TIMEOUT_SECONDS
+            )
+            return (
+                f"⚠ This operation timed out after {TOOL_TIMEOUT_SECONDS}s. "
+                f"Try a narrower request — e.g. call get_menu for a single "
+                f"restaurant instead of get_all_menus, or call login first "
+                f"to warm up the browser before heavy operations."
+            )
+        if error_box:
+            raise error_box[0]
+        return result_box[0]
+
+    return wrapper
+
+
 def _auto_login_wrapper(fn):
     """Decorator: auto-login before running a tool, prompting for MFA
     or credentials setup if needed."""
-    import functools
-
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         try:
@@ -200,6 +246,7 @@ def set_credentials(email: str, password: str) -> str:
 
 
 @mcp.tool()
+@_with_timeout
 def login() -> str:
     """Log in to Relish.
 
@@ -228,6 +275,7 @@ def login() -> str:
 
 
 @mcp.tool()
+@_with_timeout
 def submit_mfa_code(code: str) -> str:
     """Submit the MFA verification code sent to your email.
     Only needed when login() returns 'awaiting_mfa'.
@@ -248,6 +296,7 @@ def submit_mfa_code(code: str) -> str:
 
 
 @mcp.tool()
+@_with_timeout
 @_auto_login_wrapper
 def get_schedule(date: str | None = None) -> str:
     """Get today's (or a specific date's) restaurants and your existing orders.
@@ -266,6 +315,7 @@ def get_schedule(date: str | None = None) -> str:
 
 
 @mcp.tool()
+@_with_timeout
 @_auto_login_wrapper
 def get_week_overview() -> str:
     """Get a summary of the whole week: all available dates, restaurants,
@@ -276,6 +326,9 @@ def get_week_overview() -> str:
     b = _get_browser()
     today_schedule = b.get_schedule()
     all_dates = today_schedule.available_dates
+
+    today_actual = datetime.date.today().isoformat()
+    skip_dates = {"today", today_schedule.date, today_actual}
 
     lines = [f"=== {today_schedule.date_label} ({today_schedule.date}) ==="]
     if today_schedule.subsidy:
@@ -289,7 +342,7 @@ def get_week_overview() -> str:
         lines.append(f"  • {r.name}{tag} ({status})")
 
     for d in all_dates:
-        if d["date"] == today_schedule.date or d["date"] == "today":
+        if d["date"] in skip_dates:
             continue
         try:
             sched = b.get_schedule(d["date"])
@@ -311,28 +364,34 @@ def get_week_overview() -> str:
 
 
 @mcp.tool()
+@_with_timeout
 @_auto_login_wrapper
 def get_unordered_days() -> str:
-    """Scan the whole week and return full menus for every day you haven't
-    ordered on yet.
+    """Scan the whole week and return which days need orders.
 
-    This is the starting point for batch-ordering: call it once to see
-    every unordered day's restaurants and menu items, then call
-    get_item_options + place_order for each day.
+    Returns schedule info for every day: date, subsidy, restaurants
+    (name, tags, schedule_entry_id), and existing orders. Does NOT
+    fetch full menus — call get_all_menus(date) per unordered day
+    to see menu items.
 
-    Returns: for each unordered day — date, subsidy, restaurants with
-    full menu items (name, price, category, item ID). Days that already
-    have orders are listed briefly so you can see the full picture.
+    Typical batch-ordering flow:
+      1. login() — warm up the browser
+      2. get_unordered_days() — see which days need orders
+      3. get_all_menus(date) — for each NEEDS ORDER day
+      4. get_item_options + place_order — for each pick
     """
     b = _get_browser()
     today_schedule = b.get_schedule()
     all_dates = today_schedule.available_dates
 
+    today_actual = datetime.date.today().isoformat()
+    skip_dates = {"today", today_schedule.date, today_actual}
+
     schedules = [
         (today_schedule.date, today_schedule),
     ]
     for d in all_dates:
-        if d["date"] == today_schedule.date or d["date"] == "today":
+        if d["date"] in skip_dates:
             continue
         try:
             schedules.append((d["date"], b.get_schedule(d["date"])))
@@ -368,29 +427,22 @@ def get_unordered_days() -> str:
         lines.append(f"{'='*50}")
         if sched.subsidy:
             lines.append(f"Subsidy: {sched.subsidy}")
-
-        all_menus = b.get_all_menus(date_str)
-        if all_menus:
-            for restaurant, items in all_menus.items():
-                tag_info = ""
-                for r in sched.restaurants:
-                    if r.name == restaurant and r.tags:
-                        tag_info = f" [{', '.join(r.tags)}]"
-                        break
-                lines.append(f"\n  --- {restaurant}{tag_info} ({len(items)} items) ---")
-                for item in items:
-                    lines.append(f"    • {item}")
-        else:
-            for r in sched.restaurants:
-                if not r.closed:
-                    tag = f" [{', '.join(r.tags)}]" if r.tags else ""
-                    lines.append(f"  • {r.name}{tag} (ID: {r.schedule_entry_id})")
+        for r in sched.restaurants:
+            if not r.closed:
+                tag = f" [{', '.join(r.tags)}]" if r.tags else ""
+                lines.append(
+                    f"  • {r.name}{tag} (ID: {r.schedule_entry_id})"
+                )
 
     summary = f"Week summary: {unordered_count} day(s) need orders, {ordered_count} already ordered."
+    lines.append(
+        f"\n→ Call get_all_menus(date) for each NEEDS ORDER day to see menu items."
+    )
     return summary + "\n" + "\n".join(lines)
 
 
 @mcp.tool()
+@_with_timeout
 @_auto_login_wrapper
 def get_subsidy(date: str | None = None) -> str:
     """Get your remaining company meal subsidy for a date.
@@ -409,6 +461,7 @@ def get_subsidy(date: str | None = None) -> str:
 
 
 @mcp.tool()
+@_with_timeout
 @_auto_login_wrapper
 def get_all_menus(date: str | None = None) -> str:
     """Get menus for ALL restaurants on a given date.
@@ -435,6 +488,7 @@ def get_all_menus(date: str | None = None) -> str:
 
 
 @mcp.tool()
+@_with_timeout
 @_auto_login_wrapper
 def save_menus_to_file(date: str | None = None, filepath: str | None = None) -> str:
     """Get all menus for a date and save to a markdown file.
@@ -449,6 +503,7 @@ def save_menus_to_file(date: str | None = None, filepath: str | None = None) -> 
 
 
 @mcp.tool()
+@_with_timeout
 @_auto_login_wrapper
 def get_menu(schedule_entry_id: str) -> str:
     """Get a single restaurant's menu items.
@@ -475,6 +530,7 @@ def get_menu(schedule_entry_id: str) -> str:
 
 
 @mcp.tool()
+@_with_timeout
 @_auto_login_wrapper
 def get_orders(tab: str = "upcoming") -> str:
     """Get your orders.
@@ -496,6 +552,7 @@ def get_orders(tab: str = "upcoming") -> str:
 
 
 @mcp.tool()
+@_with_timeout
 @_auto_login_wrapper
 def get_item_options(schedule_entry_id: str, menu_item_id: str) -> str:
     """Get all customization options for a menu item (sizes, sides,
@@ -524,6 +581,7 @@ def get_item_options(schedule_entry_id: str, menu_item_id: str) -> str:
 
 
 @mcp.tool()
+@_with_timeout
 @_auto_login_wrapper
 def place_order(
     schedule_entry_id: str,
@@ -559,6 +617,7 @@ def place_order(
 
 
 @mcp.tool()
+@_with_timeout
 @_auto_login_wrapper
 def cancel_order(order_id: str) -> str:
     """Cancel an existing order.
@@ -594,7 +653,12 @@ def check_subsidy(
     lines: list[str] = []
     for item in items:
         name = item.get("name", "Unknown")
-        price = float(item.get("price", 0))
+        raw_price = item.get("price", 0)
+        try:
+            price = float(str(raw_price).strip().lstrip("$"))
+        except (ValueError, TypeError):
+            lines.append(f"{name}: could not parse price '{raw_price}'")
+            continue
         total = round(price * (1 + tax_rate), 2)
         fits = total <= subsidy
         verdict = "SAFE" if fits else "OVER"
@@ -692,8 +756,11 @@ def set_food_preferences(
 @mcp.tool()
 def logout() -> str:
     """Close the browser session and log out."""
-    b = _get_browser()
-    b.close()
+    global browser
+    if browser is None:
+        return "No active browser session."
+    browser.close()
+    browser = None
     return "Logged out and browser closed."
 
 

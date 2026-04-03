@@ -80,7 +80,7 @@ class ItemChoice:
     def __str__(self) -> str:
         sel = " [SELECTED]" if self.selected else ""
         price = f" +{self.price}" if self.price and self.price != "0" else ""
-        return f"{self.label}{price}{sel}"
+        return f"{self.label}{price}{sel}  (value={self.value})"
 
 
 @dataclass
@@ -96,7 +96,7 @@ class ItemOptionGroup:
 
     def __str__(self) -> str:
         req = "Required" if self.required else "Optional"
-        lines = [f"{self.name} ({req}, {self.input_type}):"]
+        lines = [f"{self.name} ({req}, {self.input_type}, group_id={self.group_id}):"]
         for c in self.choices:
             lines.append(f"    • {c}")
         return "\n".join(lines)

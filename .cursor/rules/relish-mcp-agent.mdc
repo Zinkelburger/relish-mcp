@@ -35,10 +35,17 @@ All of this persists to disk. Subsequent sessions skip straight to ordering.
 ## Tool workflow
 
 ```
-set_credentials → login → get_schedule(date?) → get_menu(schedule_entry_id) → get_item_options(schedule_entry_id, menu_item_id) → check_subsidy(items, subsidy) → place_order(...)
-                                                                             → cancel_order(order_id)
-                        → get_unordered_days() → [for each day] get_item_options(...) → check_subsidy(...) → place_order(...)
+login → get_unordered_days() → [for each NEEDS ORDER day] get_all_menus(date) → get_item_options(...) → check_subsidy(...) → place_order(...)
+login → get_schedule(date?) → get_menu(schedule_entry_id) → get_item_options(...) → check_subsidy(...) → place_order(...)
+                                                          → cancel_order(order_id)
 ```
+
+### IMPORTANT: Always call `login` first
+
+Every session should start with a `login` call. This warms up the browser
+and authenticates (~12s) in its own short tool call. Without it, the first
+heavy tool call silently pays the browser startup + auth cost, risking a
+timeout. After `login`, the browser stays warm for all subsequent calls.
 
 ### ID chain
 
@@ -68,7 +75,7 @@ Each tool produces IDs the next tool needs:
 | `submit_mfa_code` | Complete MFA | Only after login returns "awaiting_mfa" |
 | `get_schedule` | See restaurants + orders for a date | Starting point for any date |
 | `get_week_overview` | See the full week at once | "What's for lunch this week?" |
-| `get_unordered_days` | Scan the week, return full menus for days without orders | Batch ordering — "order for the whole week" |
+| `get_unordered_days` | Scan the week, return which days need orders (no menus) | Batch ordering — then call `get_all_menus(date)` per day |
 | `get_subsidy` | Check remaining budget | Before ordering, to verify coverage |
 | `get_menu` | See one restaurant's items | When user picks a restaurant |
 | `get_item_options` | See sizes, sides, toppings for an item | Before placing any order — many items have required choices |
@@ -96,15 +103,17 @@ Each tool produces IDs the next tool needs:
 This is the most common request. The user says **"order my lunches"** (or similar: "make my relish orders", "fill in my orders", "order for the week"). The agent should:
 
 1. `get_food_preferences` — know what to pick and check the `auto_order` setting.
-2. `get_unordered_days` — one call returns the full week: days already ordered (skip), days with all restaurants closed (skip), and days needing orders (with full menus).
-3. For each "NEEDS ORDER" day, pick the best item:
+2. `login` — warm up the browser and authenticate (do this early, before heavy calls).
+3. `get_unordered_days` — returns the week overview: days already ordered (skip), days with all restaurants closed (skip), and days needing orders (with restaurant names and IDs, but no menus).
+4. For each "NEEDS ORDER" day, call `get_all_menus(date)` — one call per day to get full menu items.
+5. For each day, pick the best item:
    - Match the user's food preferences (yes list, style, notes).
    - Prefer restaurants tagged "Office favorite".
    - Stay within the subsidy — upgrade size first, add extras, but never exceed $0.00 out-of-pocket.
-4. `get_item_options(schedule_entry_id, menu_item_id)` for each pick — check sizes and required options.
-5. `check_subsidy(items, subsidy)` for each pick — verify the item + tax fits. If OVER, pick a cheaper item.
-6. **If `auto_order` is ON**: go ahead and `place_order(...)` for each day immediately. Tell the user what was ordered after the fact.
-7. **If `auto_order` is OFF** (default): present ALL picks to the user in one batch (day, restaurant, item, size, extras, estimated price). Wait for the user to confirm, then `place_order(...)` for each approved day.
+6. `get_item_options(schedule_entry_id, menu_item_id)` for each pick — check sizes and required options.
+7. `check_subsidy(items, subsidy)` for each pick — verify the item + tax fits. If OVER, pick a cheaper item.
+8. **If `auto_order` is ON**: go ahead and `place_order(...)` for each day immediately. Tell the user what was ordered after the fact.
+9. **If `auto_order` is OFF** (default): present ALL picks to the user in one batch (day, restaurant, item, size, extras, estimated price). Wait for the user to confirm, then `place_order(...)` for each approved day.
 
 This is safe to run daily — it skips days that already have orders.
 
@@ -133,8 +142,10 @@ The user can toggle it anytime: "turn on auto-order" → `set_food_preferences(a
 
 ## Important notes
 
-- The browser is headless Selenium — each tool call takes 3-10 seconds due to page loads. Batch information gathering when possible.
-- `get_all_menus` loads every restaurant's page sequentially (slow but thorough). Use `get_menu` for a single restaurant.
+- **Timeouts**: Every tool has a 50-second server-side timeout. If a call times out, you'll get an error message instead of a crash. Retry with a narrower request (e.g. `get_menu` for one restaurant instead of `get_all_menus`).
+- **Always call `login` first** — this warms up the browser in its own short call. Without it, the first heavy call pays the browser startup cost and may time out.
+- `get_all_menus` loads every restaurant's page sequentially (slow but thorough). Use `get_menu` for a single restaurant if `get_all_menus` times out.
+- `get_unordered_days` returns restaurants and IDs but **not** full menus. Call `get_all_menus(date)` per day afterward.
 - `place_order` clears the cart first, so it's safe to call even if a previous attempt left items in the cart.
 - **Always call `get_item_options` before `place_order`** — many items have required size selections, and some "build your own" items need options to constitute a meal.
 - When passing `options` to `place_order`, the keys are the `group_id` strings and values are lists of `value` strings, both from `get_item_options` output.
