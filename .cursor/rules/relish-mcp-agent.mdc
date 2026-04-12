@@ -143,12 +143,14 @@ The user can toggle it anytime: "turn on auto-order" → `set_food_preferences(a
 
 ## Important notes
 
-- **Timeouts**: Every tool has a 50-second server-side timeout. If a call times out, you'll get an error message instead of a crash. Retry with a narrower request (e.g. `get_menu` for one restaurant instead of `get_all_menus`).
+- **NEVER call browser-accessing tools in parallel.** The server uses a single shared Selenium WebDriver. Concurrent calls will race on the same browser and corrupt each other — or cause timeouts when a lock serializes them. Always call tools like `get_all_menus`, `get_menu`, `get_schedule`, `get_item_options`, `place_order`, etc. **one at a time, sequentially**. Wait for each call to finish before starting the next. The only tools safe to call in parallel are non-browser tools like `check_subsidy`, `get_food_preferences`, and `set_food_preferences`.
+- **Timeouts**: Every browser tool has a 90-second server-side timeout. If a call times out, you'll get an error message instead of a crash. Retry with a narrower request (e.g. `get_menu` for one restaurant instead of `get_all_menus`).
 - **Always call `login` first** — this warms up the browser in its own short call. Without it, the first heavy call pays the browser startup cost and may time out.
 - `get_all_menus` loads every restaurant's page sequentially (slow but thorough). Use `get_menu` for a single restaurant if `get_all_menus` times out.
+- **When ordering multiple days**: call `get_all_menus` for one day, wait for the result, then call it for the next day. Do NOT fire off multiple days at once.
 - `get_unordered_days` returns restaurants and IDs but **not** full menus. Call `get_all_menus(date)` per day afterward.
 - `place_order` clears the cart first, so it's safe to call even if a previous attempt left items in the cart.
 - **Always call `get_item_options` before `place_order`** — many items have required size selections, and some "build your own" items need options to constitute a meal.
 - When passing `options` to `place_order`, the keys are the `group_id` strings and values are lists of `value` strings, both from `get_item_options` output.
 - Dates use `YYYY-MM-DD` format. The schedule only shows dates the company has Relish service.
-- **Deduplicate `get_unordered_days` results**: The tool can return a "(today)" entry that is a duplicate of an explicitly-dated entry (e.g., if today is Friday and the next service day is Monday, both "(today)" and "2026-04-06" may appear with **identical `schedule_entry_id`s**). Always deduplicate by `schedule_entry_id` — if two entries share the same restaurant IDs, they are the same day. Use the explicit `YYYY-MM-DD` date and discard the duplicate to avoid ordering for a phantom extra day.
+- **Deduplicate `get_unordered_days` results**: The tool can return a "(today)" entry that is a duplicate of an explicitly-dated entry (e.g., if today is Friday and the next service day is Monday, both "(today)" and "2026-04-06" may appear with **identical `schedule_entry_id`s**). Always deduplicate by `schedule_entry_id` — if two entries share the same restaurant IDs, they are the same day. Use the explicit `YYYY-MM-DD` date and discard the duplicate to avoid ordering for a phantom extra day. Handle this silently — do NOT mention the dedup to the user.

@@ -153,7 +153,9 @@ def _ensure_logged_in() -> RelishBrowser:
     return b
 
 
-TOOL_TIMEOUT_SECONDS = int(os.environ.get("RELISH_TOOL_TIMEOUT", "50"))
+TOOL_TIMEOUT_SECONDS = int(os.environ.get("RELISH_TOOL_TIMEOUT", "90"))
+
+_browser_lock = threading.Lock()
 
 
 def _with_timeout(fn):
@@ -162,6 +164,10 @@ def _with_timeout(fn):
     If the function doesn't finish within TOOL_TIMEOUT_SECONDS, returns
     a graceful error message instead of hanging until the MCP client
     disconnects.
+
+    A global lock serializes all browser-accessing tool calls so that
+    concurrent MCP requests queue up instead of racing on the single
+    shared WebDriver.
     """
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
@@ -170,7 +176,8 @@ def _with_timeout(fn):
 
         def _target():
             try:
-                result_box.append(fn(*args, **kwargs))
+                with _browser_lock:
+                    result_box.append(fn(*args, **kwargs))
             except Exception as exc:
                 error_box.append(exc)
 
@@ -179,9 +186,6 @@ def _with_timeout(fn):
         t.join(timeout=TOOL_TIMEOUT_SECONDS)
 
         if t.is_alive():
-            # TODO: the abandoned daemon thread still holds the WebDriver.
-            # Consider resetting the browser instance here so the next
-            # call doesn't race with a stale Selenium session.
             LOG.error(
                 "Tool %s timed out after %ds", fn.__name__, TOOL_TIMEOUT_SECONDS
             )
