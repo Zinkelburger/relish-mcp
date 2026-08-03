@@ -6,11 +6,16 @@ import functools
 import json
 import logging
 import os
+import shlex
+import shutil
+import subprocess
+import sys
 import threading
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
+from auto_order import run_backup_order
 from relish_browser import RelishBrowser
 from relish_models import LoginState
 
@@ -107,7 +112,12 @@ mcp = FastMCP(
         "3. Call `login` — if MFA is needed, ask for the 6-digit email "
         "code and call `submit_mfa_code`.\n"
         "4. Call `get_food_preferences` — if empty, ask the user what "
-        "cuisines they like/dislike, then call `set_food_preferences`.\n\n"
+        "cuisines they like/dislike, then call `set_food_preferences`.\n"
+        "5. Offer the optional weekday backup: ask the user \"Want me to "
+        "install a weekday 9:00 AM backup that orders for today if you "
+        "haven't?\" Show `preview_auto_order` first if they're curious. "
+        "Only call `setup_auto_order_cron` after an explicit yes — never "
+        "unprompted.\n\n"
         "## Quick start (after setup)\n"
         "1. Call `get_schedule` to see today's restaurants and existing "
         "orders. Each restaurant has a `schedule_entry_id`.\n"
@@ -682,6 +692,144 @@ def cancel_order(order_id: str) -> str:
     """
     b = _get_browser()
     return b.cancel_order(order_id)
+
+
+# ------------------------------------------------------------------
+# Backup auto-order (cron)
+# ------------------------------------------------------------------
+
+CRON_TAG = "# relish-auto-order"
+AUTO_ORDER_LOG = _PROJECT_DIR / "auto_order.log"
+
+
+def _read_crontab() -> str:
+    result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    # Non-zero usually just means "no crontab for this user"
+    return result.stdout if result.returncode == 0 else ""
+
+
+def _write_crontab(content: str) -> None:
+    if content and not content.endswith("\n"):
+        content += "\n"
+    result = subprocess.run(
+        ["crontab", "-"], input=content, capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"crontab update failed: {result.stderr.strip()}")
+
+
+def _strip_auto_order_lines(tab: str) -> str:
+    return "".join(
+        line for line in tab.splitlines(keepends=True) if CRON_TAG not in line
+    )
+
+
+@mcp.tool()
+@_with_timeout
+@_auto_login_wrapper
+def preview_auto_order() -> str:
+    """Dry-run of the weekday backup auto-order: shows what it WOULD
+    order for today. Never places an order.
+
+    Use this to demo the backup before the user opts in via
+    setup_auto_order_cron, or to sanity-check its pick anytime. The
+    backup uses a deterministic heuristic (liked keywords, 'Office
+    favorite' tag, highest-priced item that fits the subsidy after tax).
+    """
+    b = _get_browser()
+    return run_backup_order(b, _load_food_prefs(), dry_run=True)
+
+
+@mcp.tool()
+def setup_auto_order_cron(hour: int = 9, minute: int = 0) -> str:
+    """Install a weekday cron job that backup-orders TODAY's lunch.
+
+    IMPORTANT: This modifies the user's system (their crontab). ALWAYS
+    ask the user for explicit confirmation first — e.g. "Want me to
+    install a weekday 9:00 AM backup that orders for today if you
+    haven't?" — and only call this after they clearly say yes. Never
+    call it unprompted. Offer preview_auto_order first so they can see
+    what it would pick.
+
+    The job runs auto_order.py every weekday at the given time: if today
+    already has an order it does nothing; otherwise it orders ONE item
+    for TODAY ONLY (never the whole week), matching food preferences and
+    always within the subsidy. It is deterministic Python — no AI at
+    runtime. Output is appended to auto_order.log. Re-running this tool
+    replaces any existing schedule.
+
+    Args:
+        hour: Hour of day, 0-23. Default 9.
+        minute: Minute, 0-59. Default 0.
+    """
+    if shutil.which("crontab") is None:
+        return (
+            "crontab is not available on this system (Linux/macOS only) — "
+            "cannot install the backup auto-order."
+        )
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return "Invalid time — hour must be 0-23 and minute 0-59."
+    if EMAIL is None or PASSWORD is None:
+        return (
+            "Credentials aren't configured yet — finish first-time setup "
+            "(set_credentials + login) before installing the backup."
+        )
+
+    script = _PROJECT_DIR / "auto_order.py"
+    line = (
+        f"{minute} {hour} * * 1-5 "
+        f"cd {shlex.quote(str(_PROJECT_DIR))} && "
+        f"{shlex.quote(sys.executable)} {shlex.quote(str(script))} "
+        f">> {shlex.quote(str(AUTO_ORDER_LOG))} 2>&1 {CRON_TAG}"
+    )
+    tab = _strip_auto_order_lines(_read_crontab())
+    _write_crontab(tab + line + "\n")
+    return (
+        f"Backup auto-order installed — weekdays at {hour:02d}:{minute:02d}. "
+        f"It orders for today only when nothing is ordered yet, and logs to "
+        f"{AUTO_ORDER_LOG.name}. Check it with auto_order_status, remove it "
+        f"with remove_auto_order_cron. Note: if login cookies expire, the "
+        f"backup logs an MFA warning instead of ordering — a quick `login` "
+        f"here refreshes them."
+    )
+
+
+@mcp.tool()
+def auto_order_status() -> str:
+    """Show whether the weekday backup auto-order is installed, its
+    schedule, and recent log output from past runs."""
+    if shutil.which("crontab") is None:
+        return "crontab is not available on this system."
+    lines = [l for l in _read_crontab().splitlines() if CRON_TAG in l]
+    if not lines:
+        return (
+            "Backup auto-order is NOT installed. If the user wants a "
+            "weekday safety net, offer setup_auto_order_cron."
+        )
+    out = ["Backup auto-order is installed:"]
+    out.extend(f"  {l}" for l in lines)
+    if AUTO_ORDER_LOG.exists():
+        tail = AUTO_ORDER_LOG.read_text().splitlines()[-15:]
+        out.append("\nRecent log:")
+        out.extend(f"  {l}" for l in tail)
+    else:
+        out.append("\nNo runs logged yet.")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def remove_auto_order_cron() -> str:
+    """Remove the weekday backup auto-order cron job.
+
+    Confirm with the user before calling — this disables their backup.
+    """
+    if shutil.which("crontab") is None:
+        return "crontab is not available on this system."
+    tab = _read_crontab()
+    if CRON_TAG not in tab:
+        return "Backup auto-order was not installed — nothing to remove."
+    _write_crontab(_strip_auto_order_lines(tab))
+    return "Backup auto-order cron job removed."
 
 
 # ------------------------------------------------------------------

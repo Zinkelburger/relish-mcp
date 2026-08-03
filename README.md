@@ -32,6 +32,7 @@ Other things you can say:
 - **Browse menus** — full menus with prices, categories, and dietary tags
 - **Place & cancel orders** — end-to-end ordering and cancellation
 - **Subsidy tracking** — stay within your company meal budget automatically
+- **9AM backup auto-order (opt-in)** — a cron job orders for today if you forgot; you stay in control until it fires
 - **Cookie persistence** — MFA only needed once every 30 days
 
 ## Setup
@@ -81,6 +82,10 @@ The `.cursor/mcp.json` is already configured — just open this project in Curso
 
 Set `RELISH_HEADLESS=0` in `.cursor/mcp.json` env to see the browser window (useful for debugging).
 
+**With Claude Code:**
+
+The project ships a `.mcp.json`, so just run `claude` inside this directory and approve the `relish` server when prompted. `CLAUDE.md` gives the agent the same guidance Cursor gets from `.cursor/rules/`. Everything — setup, ordering, the 9AM backup — works identically.
+
 **Standalone (stdio transport):**
 
 ```bash
@@ -118,6 +123,10 @@ All of this happens conversationally — just start chatting with the agent and 
 | `check_subsidy` | Check items fit the subsidy after tax (pure math, call before `place_order`) |
 | `get_food_preferences` | User's dietary preferences |
 | `set_food_preferences` | Update preferences |
+| `preview_auto_order` | Dry-run of the 9AM backup — shows the pick, never orders |
+| `setup_auto_order_cron` | Install the weekday backup (agent asks you first) |
+| `auto_order_status` | Backup install state + recent run log |
+| `remove_auto_order_cron` | Uninstall the backup |
 | `logout` | Close browser session |
 
 ## Architecture
@@ -130,6 +139,22 @@ relish_models.py       — Dataclasses (DaySchedule, MenuItem, Order, etc.)
 .cookies.json          — Session cookies (gitignored)
 .food_preferences.json — Dietary preferences (gitignored)
 ```
+
+## 9AM backup auto-order (opt-in)
+
+During setup (or anytime), the agent will *ask* — never assume — whether you want a weekday safety net:
+
+> "Want me to install a weekday 9:00 AM backup that orders for today if you haven't?"
+
+Say yes and it calls `setup_auto_order_cron`, which installs a crontab entry running `auto_order.py` every weekday. The design keeps you in control and mistake-proof:
+
+- **You choose until it fires** — order manually any morning and the backup sees your order and does nothing.
+- **Today only** — it never orders for future days.
+- **Deterministic** — the cron job is plain Python (no AI at runtime): preference keywords rank restaurants and items, and it picks the most food that fits your subsidy after tax. If it can't read the subsidy, it refuses to order rather than risk charging you.
+- **Transparent** — ask the agent to run `preview_auto_order` to see exactly what it would pick today (without ordering), and `auto_order_status` for the run log (`auto_order.log`).
+- **Reversible** — "turn off the backup" → `remove_auto_order_cron`.
+
+If your login cookies expire, the backup logs a warning instead of ordering; a quick `login` through the agent fixes it. Requires `crontab` (Linux/macOS).
 
 ## Food preferences
 

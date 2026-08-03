@@ -28,7 +28,12 @@ On the very first interaction, run through ALL of these steps before doing anyth
    - **Auto-order**: Should I pick and order for you automatically, or show you my picks first?
    - Then call `set_food_preferences(yes=[...], no=[...], style="...", notes="...")` and set `auto_order` in `.food_preferences.json`.
 
-4. **Confirm** — Summarize back to the user: their preferences, auto-order setting, and that they're ready to go.
+4. **Backup auto-order (optional)** — Call `auto_order_status`. If not installed, ASK the user:
+   - *"Want me to install a weekday 9:00 AM backup? If you haven't ordered by then, it automatically orders one item for that day (never the whole week), matched to your preferences and always within the subsidy."*
+   - If they're curious, run `preview_auto_order` to show exactly what it would pick today.
+   - **Only call `setup_auto_order_cron` after the user explicitly says yes.** Never install it unprompted. If they decline, drop it — don't ask again every session.
+
+5. **Confirm** — Summarize back to the user: their preferences, auto-order setting, backup status, and that they're ready to go.
 
 All of this persists to disk. Subsequent sessions skip straight to ordering.
 
@@ -87,6 +92,10 @@ Each tool produces IDs the next tool needs:
 | `check_subsidy` | Verify items fit within subsidy after tax | Before every `place_order` — pass candidate items and subsidy amount |
 | `get_food_preferences` | Get user's food likes/dislikes | Before recommending food |
 | `set_food_preferences` | Update preferences | When user tells you new preferences |
+| `preview_auto_order` | Dry-run the 9AM backup's pick for today | Demo before opting in; never orders |
+| `setup_auto_order_cron` | Install the weekday backup cron job | ONLY after the user explicitly agrees |
+| `auto_order_status` | Check backup install state + run log | Setup step 4, or "is my backup working?" |
+| `remove_auto_order_cron` | Uninstall the backup cron job | User says "turn off the backup" |
 | `logout` | Close browser session | When completely done |
 
 ## Choosing food for the user
@@ -126,6 +135,18 @@ The `auto_order` flag in food preferences controls whether the agent asks for co
 - **ON**: agent picks and orders in one shot without asking. Good for users who trust the preferences and just want lunch handled.
 
 The user can toggle it anytime: "turn on auto-order" → `set_food_preferences(auto_order=True)`. Or "let me pick from now on" → `set_food_preferences(auto_order=False)`.
+
+## Backup auto-order (the 9AM safety net)
+
+The backup is a **cron job running deterministic Python** (`auto_order.py`) — no AI is involved when it fires. Every weekday at the configured time it checks TODAY only: already ordered → does nothing; unordered → orders one preference-matched item within the subsidy. It never orders for future days and never exceeds the budget (it aborts if it can't read the subsidy).
+
+Rules for the agent:
+
+- **Consent is mandatory.** `setup_auto_order_cron` and `remove_auto_order_cron` change the user's system. Ask plainly ("Do you want me to do this?") and only act on an explicit yes.
+- Use `preview_auto_order` to show today's would-be pick — it never orders.
+- The human keeps control until the backup fires: they can order manually any morning, and the backup sees the existing order and stands down.
+- If `auto_order_status` shows MFA warnings in the log, the saved cookies expired — run `login` (+ `submit_mfa_code`) to refresh them and the backup resumes working.
+- "change the backup time to 8:30" → `setup_auto_order_cron(hour=8, minute=30)` (replaces the old schedule; still confirm first).
 
 ## Other common tasks
 

@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "relish": {
+      "command": "python3",
+      "args": ["server.py"],
+      "env": {
+        "RELISH_HEADLESS": "1"
+      }
+    }
+  }
+}

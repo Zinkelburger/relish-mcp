@@ -7,6 +7,8 @@ __pycache__/
 .food_preferences.json
 mfa_code.txt
 probe_status.txt
+auto_order.log
+.auto_order.lock
 html_*.html
 probe*.py
 menus_*.md
