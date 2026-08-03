@@ -5,6 +5,7 @@ browser needed beyond loading local files). Run this after changing
 parsers or refreshing fixtures to catch selector regressions.
 """
 import re
+import sys
 from pathlib import Path
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -21,6 +22,10 @@ def check(name: str, condition: bool, detail: str = ""):
         PASS += 1
     suffix = f" — {detail}" if detail else ""
     print(f"  [{status}] {name}{suffix}")
+    # Under pytest these script-style checks would otherwise report green
+    # even on failure — surface them as real assertion failures instead.
+    if "pytest" in sys.modules:
+        assert condition, f"{name}{suffix}"
 
 
 def read(filename: str) -> str:
@@ -224,7 +229,7 @@ def main():
     print(f"Results: {PASS} passed, {FAIL} failed")
     if FAIL:
         print("SOME TESTS FAILED")
-        exit(1)
+        sys.exit(1)
     else:
         print("ALL TESTS PASSED")
 

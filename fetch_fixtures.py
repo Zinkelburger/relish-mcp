@@ -1,6 +1,6 @@
 """Fetch HTML fixtures from Relish for offline sanity testing."""
 import json
-import os
+import sys
 from pathlib import Path
 from time import sleep
 
@@ -10,8 +10,6 @@ from relish_browser import RelishBrowser
 from relish_models import LoginState
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
-MFA_CODE_FILE = Path(__file__).parent / "mfa_code.txt"
-STATUS_FILE = Path(__file__).parent / "probe_status.txt"
 
 
 def save(name: str, html: str) -> None:
@@ -21,10 +19,6 @@ def save(name: str, html: str) -> None:
 
 
 def main():
-    for f in [MFA_CODE_FILE, STATUS_FILE]:
-        if f.exists():
-            f.unlink()
-
     FIXTURES_DIR.mkdir(exist_ok=True)
 
     creds = json.loads((Path(__file__).parent / ".credentials").read_text())
@@ -107,14 +101,12 @@ def main():
 
         print("\nDone — all fixtures saved to fixtures/", flush=True)
 
-    except Exception as ex:
+    except Exception:
         import traceback
         traceback.print_exc()
+        sys.exit(1)
     finally:
         b.close()
-        for f in [MFA_CODE_FILE, STATUS_FILE]:
-            if f.exists():
-                f.unlink()
 
 
 if __name__ == "__main__":

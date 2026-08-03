@@ -5,7 +5,7 @@ alwaysApply: true
 
 # Relish MCP Server — Agent Guide
 
-You have access to a `relish` MCP server that automates ordering lunch from relish.ezcater.com using a headless browser. The user's company (Red Hat) provides a daily meal subsidy (~$15). Orders within the subsidy cost $0.00.
+You have access to a `relish` MCP server that automates ordering lunch from relish.ezcater.com using a headless browser. The user's company provides a daily meal subsidy (amount varies — check `get_subsidy`). Orders within the subsidy cost $0.00.
 
 ## First-run checklist
 

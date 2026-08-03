@@ -66,21 +66,29 @@ def _save_credentials(email: str, password: str) -> None:
 
 
 def _load_food_prefs() -> dict:
+    """Read preferences from disk, merged over defaults.
+
+    Always re-read before use: the README invites users to edit
+    .food_preferences.json directly while the server is running.
+    """
+    prefs = dict(DEFAULT_PREFS)
     if PREFS_FILE.exists():
         try:
-            return json.loads(PREFS_FILE.read_text())
-        except (json.JSONDecodeError, OSError):
-            pass
-    return dict(DEFAULT_PREFS)
+            data = json.loads(PREFS_FILE.read_text())
+            if isinstance(data, dict):
+                prefs.update(data)
+        except (json.JSONDecodeError, OSError) as exc:
+            LOG.warning("Bad %s (%s) — using defaults", PREFS_FILE, exc)
+    return prefs
 
 
-def _has_food_prefs() -> bool:
+def _has_food_prefs(prefs: dict) -> bool:
     """True if the user has configured any food preferences."""
     return bool(
-        FOOD_PREFS.get("yes")
-        or FOOD_PREFS.get("no")
-        or FOOD_PREFS.get("style")
-        or FOOD_PREFS.get("notes")
+        prefs.get("yes")
+        or prefs.get("no")
+        or prefs.get("style")
+        or prefs.get("notes")
     )
 
 
@@ -156,6 +164,44 @@ def _ensure_logged_in() -> RelishBrowser:
 TOOL_TIMEOUT_SECONDS = int(os.environ.get("RELISH_TOOL_TIMEOUT", "90"))
 
 _browser_lock = threading.Lock()
+_recovery_lock = threading.Lock()
+_browser_wedged = threading.Event()
+
+
+def _close_browser_quietly(b: RelishBrowser) -> None:
+    try:
+        b.close()
+    except Exception:
+        pass
+
+
+def _recover_wedged_browser() -> None:
+    """Unstick the browser after a tool timeout.
+
+    A timed-out worker thread may still hold _browser_lock on a hung
+    Selenium call. Force-quitting the driver makes that call error out,
+    which releases the lock; the next _get_browser() starts fresh. If the
+    abandoned worker already finished on its own, the browser is left
+    untouched.
+    """
+    global browser
+    if _browser_lock.acquire(blocking=False):
+        _browser_lock.release()
+        _browser_wedged.clear()
+        return
+    LOG.warning("Browser wedged by a timed-out call — force-restarting it")
+    b, browser = browser, None
+    if b is not None:
+        quitter = threading.Thread(
+            target=_close_browser_quietly, args=(b,), daemon=True
+        )
+        quitter.start()
+        quitter.join(timeout=15)
+    if _browser_lock.acquire(timeout=15):
+        _browser_lock.release()
+        _browser_wedged.clear()
+    else:
+        LOG.error("Browser lock still held after forced restart")
 
 
 def _with_timeout(fn):
@@ -167,10 +213,17 @@ def _with_timeout(fn):
 
     A global lock serializes all browser-accessing tool calls so that
     concurrent MCP requests queue up instead of racing on the single
-    shared WebDriver.
+    shared WebDriver. A timed-out worker keeps holding the lock (it may
+    still be driving the browser), so the wedged flag makes the next
+    call force-restart the browser instead of queueing forever.
     """
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
+        if _browser_wedged.is_set():
+            with _recovery_lock:
+                if _browser_wedged.is_set():
+                    _recover_wedged_browser()
+
         result_box: list = []
         error_box: list = []
 
@@ -186,14 +239,20 @@ def _with_timeout(fn):
         t.join(timeout=TOOL_TIMEOUT_SECONDS)
 
         if t.is_alive():
+            _browser_wedged.set()
             LOG.error(
                 "Tool %s timed out after %ds", fn.__name__, TOOL_TIMEOUT_SECONDS
             )
+            hint = (
+                "Try a narrower request — e.g. call get_menu for a single "
+                "restaurant instead of get_all_menus"
+            )
+            if fn.__name__ != "login":
+                hint += ", or call login first to warm up the browser"
             return (
-                f"⚠ This operation timed out after {TOOL_TIMEOUT_SECONDS}s. "
-                f"Try a narrower request — e.g. call get_menu for a single "
-                f"restaurant instead of get_all_menus, or call login first "
-                f"to warm up the browser before heavy operations."
+                f"⚠ {fn.__name__} timed out after {TOOL_TIMEOUT_SECONDS}s. "
+                f"The browser will be reset automatically on the next tool "
+                f"call. {hint}."
             )
         if error_box:
             raise error_box[0]
@@ -299,6 +358,31 @@ def submit_mfa_code(code: str) -> str:
 # ------------------------------------------------------------------
 
 
+def _collect_week_schedules(
+    b: RelishBrowser,
+) -> tuple[list[tuple[str, object]], list[tuple[dict, Exception]]]:
+    """Fetch today's schedule plus one schedule per other available date.
+
+    Returns (schedules, failures): schedules is [(date_str, DaySchedule),
+    ...] with today first; failures lists the date dicts that failed to
+    load along with the exception.
+    """
+    today_schedule = b.get_schedule()
+    seen = {"today", today_schedule.date, datetime.date.today().isoformat()}
+    schedules: list[tuple[str, object]] = [(today_schedule.date, today_schedule)]
+    failures: list[tuple[dict, Exception]] = []
+    for d in today_schedule.available_dates:
+        if d["date"] in seen:
+            continue
+        seen.add(d["date"])
+        try:
+            schedules.append((d["date"], b.get_schedule(d["date"])))
+        except Exception as ex:
+            LOG.warning("Could not load schedule for %s: %s", d["date"], ex)
+            failures.append((d, ex))
+    return schedules, failures
+
+
 @mcp.tool()
 @_with_timeout
 @_auto_login_wrapper
@@ -328,41 +412,23 @@ def get_week_overview() -> str:
     Useful for planning meals or seeing what's coming up.
     """
     b = _get_browser()
-    today_schedule = b.get_schedule()
-    all_dates = today_schedule.available_dates
+    schedules, failures = _collect_week_schedules(b)
 
-    today_actual = datetime.date.today().isoformat()
-    skip_dates = {"today", today_schedule.date, today_actual}
-
-    lines = [f"=== {today_schedule.date_label} ({today_schedule.date}) ==="]
-    if today_schedule.subsidy:
-        lines.append(f"Subsidy: {today_schedule.subsidy}")
-    if today_schedule.my_orders:
-        for o in today_schedule.my_orders:
+    lines: list[str] = []
+    for i, (date_str, sched) in enumerate(schedules):
+        prefix = "\n" if i else ""
+        lines.append(f"{prefix}=== {sched.date_label} ({date_str}) ===")
+        if sched.subsidy:
+            lines.append(f"Subsidy: {sched.subsidy}")
+        for o in sched.my_orders:
             lines.append(f"  ORDER: {o.restaurant} — {o.status}")
-    for r in today_schedule.restaurants:
-        tag = f" [{', '.join(r.tags)}]" if r.tags else ""
-        status = "CLOSED" if r.closed else f"by {r.order_by}"
-        lines.append(f"  • {r.name}{tag} ({status})")
-
-    for d in all_dates:
-        if d["date"] in skip_dates:
-            continue
-        try:
-            sched = b.get_schedule(d["date"])
-            lines.append(f"\n=== {sched.date_label} ({sched.date}) ===")
-            if sched.subsidy:
-                lines.append(f"Subsidy: {sched.subsidy}")
-            if sched.my_orders:
-                for o in sched.my_orders:
-                    lines.append(f"  ORDER: {o.restaurant} — {o.status}")
-            for r in sched.restaurants:
-                tag = f" [{', '.join(r.tags)}]" if r.tags else ""
-                status = "CLOSED" if r.closed else f"by {r.order_by}"
-                lines.append(f"  • {r.name}{tag} ({status})")
-        except Exception as ex:
-            lines.append(f"\n=== {d['label']} ({d['date']}) ===")
-            lines.append(f"  Error: {ex}")
+        for r in sched.restaurants:
+            tag = f" [{', '.join(r.tags)}]" if r.tags else ""
+            status = "CLOSED" if r.closed else f"by {r.order_by}"
+            lines.append(f"  • {r.name}{tag} ({status})")
+    for d, ex in failures:
+        lines.append(f"\n=== {d['label']} ({d['date']}) ===")
+        lines.append(f"  Error: {ex}")
 
     return "\n".join(lines)
 
@@ -385,22 +451,7 @@ def get_unordered_days() -> str:
       4. get_item_options + place_order — for each pick
     """
     b = _get_browser()
-    today_schedule = b.get_schedule()
-    all_dates = today_schedule.available_dates
-
-    today_actual = datetime.date.today().isoformat()
-    skip_dates = {"today", today_schedule.date, today_actual}
-
-    schedules = [
-        (today_schedule.date, today_schedule),
-    ]
-    for d in all_dates:
-        if d["date"] in skip_dates:
-            continue
-        try:
-            schedules.append((d["date"], b.get_schedule(d["date"])))
-        except Exception as ex:
-            LOG.warning("Skipping %s: %s", d["date"], ex)
+    schedules, _failures = _collect_week_schedules(b)
 
     lines: list[str] = []
     unordered_count = 0
@@ -691,7 +742,9 @@ def get_food_preferences() -> str:
     If no preferences are set, ask the user what they like/dislike
     and call set_food_preferences to save them.
     """
-    if not _has_food_prefs():
+    global FOOD_PREFS
+    FOOD_PREFS = _load_food_prefs()
+    if not _has_food_prefs(FOOD_PREFS):
         return (
             "No food preferences configured yet. "
             "Ask the user what cuisines/foods they like, what they want "
@@ -738,6 +791,9 @@ def set_food_preferences(
                    its picks and waits for the user to confirm.
     """
     global FOOD_PREFS
+    # Merge onto the latest on-disk state so a manual edit to the JSON
+    # file isn't clobbered by a stale in-memory copy.
+    FOOD_PREFS = _load_food_prefs()
     if yes is not None:
         FOOD_PREFS["yes"] = yes
     if no is not None:
@@ -763,8 +819,17 @@ def logout() -> str:
     global browser
     if browser is None:
         return "No active browser session."
-    browser.close()
-    browser = None
+    # Wait briefly for any in-flight tool call, but close regardless —
+    # logout doubles as a manual escape hatch for a stuck browser.
+    acquired = _browser_lock.acquire(timeout=10)
+    try:
+        b, browser = browser, None
+        if b is not None:
+            _close_browser_quietly(b)
+        _browser_wedged.clear()
+    finally:
+        if acquired:
+            _browser_lock.release()
     return "Logged out and browser closed."
 
 

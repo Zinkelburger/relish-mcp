@@ -11,6 +11,7 @@ html_*.html
 probe*.py
 menus_*.md
 
-# Ignore throwaway test scripts but keep fixture tests
+# Ignore throwaway test scripts but keep the real test suites
 test_*.py
 !test_fixtures.py
+!test_parsers.py

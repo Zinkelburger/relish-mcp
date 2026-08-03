@@ -23,6 +23,8 @@ Each login attempt generates a NEW MFA code. You MUST keep the same browser sess
 
 After MFA, save cookies with `driver.get_cookies()`. On next login, load them with `driver.add_cookie()` (navigate to the domain first). The "remember 30 days" checkbox means cookies skip MFA for a month.
 
+Limitation: `get_cookies()` only returns cookies for the current domain (relish.ezcater.com), so the Auth0 remember-device cookie on account.ezcater.com is NOT saved. The MFA skip therefore lasts only as long as the Relish session cookie, which can be shorter than 30 days.
+
 ## Key URLs
 
 | Page | URL |

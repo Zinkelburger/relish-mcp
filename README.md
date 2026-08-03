@@ -92,7 +92,7 @@ python server.py
 The agent handles all first-time configuration for you:
 
 1. **Credentials** — the agent will ask for your Relish email and password and save them securely (`.credentials`, chmod 600, gitignored). You can also set them manually or via environment variables (`RELISH_EMAIL`, `RELISH_PASSWORD`).
-2. **MFA** — on first login, a verification code is emailed to you. The agent will ask you to paste the 6-digit code. After that, cookies are saved and MFA is skipped for 30 days.
+2. **MFA** — on first login, a verification code is emailed to you. The agent will ask you to paste the 6-digit code. After that, cookies are saved and MFA is skipped for up to 30 days. (Only the Relish session cookies are saved, so if that session expires before the 30-day window you'll be asked for a code again.)
 3. **Food preferences** — the agent will ask what cuisines you like/dislike and how you prefer to order, then save your preferences (`.food_preferences.json`, gitignored).
 
 All of this happens conversationally — just start chatting with the agent and it will walk you through it.
@@ -115,6 +115,7 @@ All of this happens conversationally — just start chatting with the agent and 
 | `get_orders` | Upcoming or completed orders |
 | `place_order` | Order a menu item |
 | `cancel_order` | Cancel an order |
+| `check_subsidy` | Check items fit the subsidy after tax (pure math, call before `place_order`) |
 | `get_food_preferences` | User's dietary preferences |
 | `set_food_preferences` | Update preferences |
 | `logout` | Close browser session |

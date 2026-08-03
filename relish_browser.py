@@ -107,6 +107,8 @@ class RelishBrowser:
         driver = self._ensure_driver()
         cookies = driver.get_cookies()
         COOKIES_FILE.write_text(json.dumps(cookies, indent=2))
+        # Session cookies are as sensitive as the password
+        COOKIES_FILE.chmod(0o600)
         LOG.info("Saved %d cookies to %s", len(cookies), COOKIES_FILE)
 
     def _load_cookies(self) -> bool:
@@ -206,6 +208,16 @@ class RelishBrowser:
             self._state = LoginState.AWAITING_MFA
             return self._state
 
+        # A wrong password leaves us on the Auth0 login page with no MFA
+        # redirect — don't report success (and save cookies) for that.
+        if not self._is_logged_in():
+            self._state = LoginState.LOGGED_OUT
+            raise RuntimeError(
+                "Login failed — still on the sign-in page after submitting "
+                "the password. The email or password is likely wrong. "
+                "Update them with set_credentials and try again."
+            )
+
         self._state = LoginState.LOGGED_IN
         self._save_cookies()
         LOG.info("Logged in (no MFA required)")
@@ -272,6 +284,11 @@ class RelishBrowser:
 
     def get_schedule(self, date: str | None = None) -> DaySchedule:
         """Get the schedule for a given date (YYYY-MM-DD) or today."""
+        if date is not None and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+            raise ValueError(
+                f"Invalid date {date!r}: use YYYY-MM-DD format "
+                "(e.g. 2026-08-05), or omit the date for today."
+            )
         self._require_logged_in()
         driver = self._ensure_driver()
 
@@ -754,11 +771,32 @@ class RelishBrowser:
                 except Exception:
                     continue
 
-        result_text = driver.execute_script("return document.body.innerText")
+        result_text = driver.execute_script("return document.body.innerText") or ""
 
         if final_submitted:
-            summary = self._extract_order_summary(driver, result_text)
-            return f"Order placed successfully. {summary}"
+            # Clicking the button is not proof the order went through — a
+            # rejected form (e.g. unsatisfied required option) stays on the
+            # review page. Only report success once we've left it.
+            body_lower = result_text.lower()
+            url_now = driver.current_url
+            still_on_review = (
+                "/review" in url_now or "place your order" in body_lower
+            )
+            confirmed = not still_on_review and (
+                "order placed" in body_lower
+                or "was placed" in body_lower
+                or "customer_orders" in url_now
+                or "/schedule" in url_now
+            )
+            if confirmed:
+                summary = self._extract_order_summary(driver, result_text)
+                return f"Order placed successfully. {summary}"
+            lines = self._filter_page_lines(result_text)
+            return (
+                "Clicked 'Place your order' but could not confirm it went "
+                "through — the page still looks like the review step. Call "
+                "get_orders to check before retrying.\n" + "\n".join(lines[:10])
+            )
         lines = self._filter_page_lines(result_text)
         return "On review page but could not submit order.\n" + "\n".join(lines[:10])
 
@@ -802,26 +840,44 @@ class RelishBrowser:
         except NoSuchElementException:
             return f"Could not find cancel button for order {order_id}."
 
-        # Confirm the cancellation
-        try:
-            for selector in [
-                "a[data-method='delete']",
-                "a.button[href*='cancel']",
-                "button[type='submit']",
-                "input[type='submit']",
-            ]:
+        # Confirm the cancellation — click only affirmative controls,
+        # never dismiss buttons like "No, keep order" or a bare "Close".
+        negative = ("keep", "don't", "do not", "go back", "never mind", "close")
+        clicked = False
+        for selector in [
+            "a[data-method='delete']",
+            "a.button[href*='cancel']",
+            "button[type='submit']",
+            "input[type='submit']",
+        ]:
+            try:
                 btns = driver.find_elements(By.CSS_SELECTOR, selector)
-                for btn in btns:
-                    txt = btn.text.strip().lower()
-                    if "cancel" in txt or "yes" in txt or "confirm" in txt:
-                        driver.execute_script("arguments[0].click()", btn)
-                        sleep(3)
-                        break
-                else:
+            except Exception:
+                continue
+            for btn in btns:
+                try:
+                    txt = (
+                        btn.text or btn.get_attribute("value") or ""
+                    ).strip().lower()
+                    href = btn.get_attribute("href") or ""
+                    if any(n in txt for n in negative):
+                        continue
+                    affirmative = (
+                        order_id in href
+                        or "cancel" in txt
+                        or "yes" in txt
+                        or "confirm" in txt
+                    )
+                    if not affirmative:
+                        continue
+                    driver.execute_script("arguments[0].click()", btn)
+                except Exception:
                     continue
+                sleep(3)
+                clicked = True
                 break
-        except Exception:
-            pass
+            if clicked:
+                break
 
         body = driver.find_element(By.TAG_NAME, "body").text.lower()
         success = "canceled" in body or "cancelled" in body
